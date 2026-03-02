@@ -1,4 +1,5 @@
 """Supabase 客戶端封裝，提供 upsert 與查詢操作。"""
+import math
 import logging
 from supabase import create_client, Client
 from src.config import SUPABASE_URL, SUPABASE_KEY
@@ -15,10 +16,20 @@ def get_client() -> Client:
     return _client
 
 
+def _sanitize(rows: list[dict]) -> list[dict]:
+    """將 NaN / Inf 轉成 None，避免 Supabase JSON 解析錯誤。"""
+    def clean(v):
+        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
+            return None
+        return v
+    return [{k: clean(v) for k, v in row.items()} for row in rows]
+
+
 def upsert(table: str, rows: list[dict], on_conflict: str = "") -> None:
     """批次 upsert，空資料直接跳過。"""
     if not rows:
         return
+    rows = _sanitize(rows)
     try:
         q = get_client().table(table).upsert(rows)
         if on_conflict:
