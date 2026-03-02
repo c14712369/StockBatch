@@ -4,6 +4,7 @@
   三大法人 + 融資  : TWSE Open API
   月營收          : FinMind 免費嘗試（失敗則跳過）
 """
+import math
 import time
 import logging
 from datetime import date, timedelta
@@ -40,6 +41,15 @@ def _clean_num(s) -> float:
         return float(str(s).replace(",", "").replace("--", "0").strip() or 0)
     except (ValueError, TypeError):
         return 0.0
+
+
+def _to_int(v) -> int:
+    """安全地將值轉為 int；NaN / Inf / None 均回傳 0。"""
+    try:
+        f = float(v)
+        return 0 if (math.isnan(f) or math.isinf(f)) else int(round(f))
+    except (TypeError, ValueError):
+        return 0
 
 
 # ────────────────────────────────────────────────
@@ -442,7 +452,7 @@ def fetch_financials(universe: set[str]) -> tuple[pd.DataFrame, pd.DataFrame, pd
     inc, bal, cf = _yf_financials(universe)
 
     if not inc.empty:
-        inc["eps_qoq"] = inc.groupby("stock_id")["eps"].pct_change() * 100
+        inc["eps_qoq"] = inc.groupby("stock_id")["eps"].pct_change(fill_method=None) * 100
         db.upsert("quarterly_income", [
             {
                 "stock_id":         r["stock_id"],
@@ -476,8 +486,8 @@ def fetch_financials(universe: set[str]) -> tuple[pd.DataFrame, pd.DataFrame, pd
                 "stock_id":     r["stock_id"],
                 "year":         int(r["date"].year),
                 "quarter":      (int(r["date"].month) - 1) // 3 + 1,
-                "operating_cf": int(round(float(r.get("operating_cf", 0) or 0))),
-                "net_income":   int(round(float(r.get("net_income", 0) or 0))),
+                "operating_cf": _to_int(r.get("operating_cf", 0)),
+                "net_income":   _to_int(r.get("net_income", 0)),
                 "ocf_quality":  round(float(r.get("ocf_quality", 0) or 0), 4),
             }
             for _, r in cf.iterrows()
