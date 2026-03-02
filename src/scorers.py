@@ -10,6 +10,13 @@ from src.config import WEIGHTS
 logger = logging.getLogger(__name__)
 
 
+def _filter(df: pd.DataFrame, stock_id: str) -> pd.DataFrame:
+    """安全過濾：空 DataFrame 或缺少 stock_id 欄時直接回傳空。"""
+    if df.empty or "stock_id" not in df.columns:
+        return pd.DataFrame()
+    return df[df["stock_id"] == stock_id]
+
+
 # ─────────────────────────────────────────────
 # 硬性門檻
 # ─────────────────────────────────────────────
@@ -24,21 +31,21 @@ def hard_filter(stock_id: str, income: pd.DataFrame, balance: pd.DataFrame,
       3. 近 3 個月營收 YOY 未連續全部為負
     """
     # --- 1. OCF > 0 ---
-    cf = cashflow[cashflow["stock_id"] == stock_id].sort_values("date")
+    cf = _filter(cashflow, stock_id).sort_values("date") if not cashflow.empty and "stock_id" in cashflow.columns else pd.DataFrame()
     if cf.empty:
         return False, "無現金流量資料"
     if cf.iloc[-1].get("operating_cf", 0) <= 0:
         return False, f"最近一季 OCF = {cf.iloc[-1].get('operating_cf', 0):,.0f}"
 
     # --- 2. 負債比 < 60% ---
-    bs = balance[balance["stock_id"] == stock_id].sort_values("date")
+    bs = _filter(balance, stock_id).sort_values("date") if not balance.empty and "stock_id" in balance.columns else pd.DataFrame()
     if not bs.empty:
         debt_ratio = bs.iloc[-1].get("debt_ratio", 0)
         if debt_ratio > 60:
             return False, f"負債比 {debt_ratio:.1f}% > 60%"
 
     # --- 3. 近 3 月 YOY 未全負 ---
-    rev = revenue[revenue["stock_id"] == stock_id].sort_values("date")
+    rev = _filter(revenue, stock_id).sort_values("date") if not revenue.empty and "stock_id" in revenue.columns else pd.DataFrame()
     if len(rev) >= 3:
         last3 = rev.tail(3)["revenue_yoy"].tolist()
         if all(v < 0 for v in last3):
@@ -56,7 +63,7 @@ def score_profitability(stock_id: str, income: pd.DataFrame,
     score = 0.0
 
     # 近 3 月平均 YOY（40分）
-    rev = revenue[revenue["stock_id"] == stock_id].sort_values("date")
+    rev = _filter(revenue, stock_id).sort_values("date")
     if not rev.empty:
         avg_yoy = rev.tail(3)["revenue_yoy"].mean()
         if avg_yoy >= 30:
@@ -69,7 +76,7 @@ def score_profitability(stock_id: str, income: pd.DataFrame,
             score += 10
 
     # EPS QoQ 成長（30分）
-    inc = income[income["stock_id"] == stock_id].sort_values("date")
+    inc = _filter(income, stock_id).sort_values("date")
     if not inc.empty:
         qoq = inc.iloc[-1].get("eps_qoq", 0) or 0
         if qoq >= 20:
@@ -99,7 +106,7 @@ def score_health(stock_id: str, balance: pd.DataFrame,
                  cashflow: pd.DataFrame) -> float:
     score = 0.0
 
-    bs = balance[balance["stock_id"] == stock_id].sort_values("date")
+    bs = _filter(balance, stock_id).sort_values("date")
     if not bs.empty:
         latest = bs.iloc[-1]
 
@@ -122,7 +129,7 @@ def score_health(stock_id: str, balance: pd.DataFrame,
             score += 10
 
     # OCF 品質 = OCF / 淨利（40分）
-    cf = cashflow[cashflow["stock_id"] == stock_id].sort_values("date")
+    cf = _filter(cashflow, stock_id).sort_values("date")
     if not cf.empty:
         quality = cf.iloc[-1].get("ocf_quality", 0) or 0
         if quality >= 1.2:
@@ -144,7 +151,7 @@ def score_chip(stock_id: str, institutional: pd.DataFrame,
     score = 0.0
 
     # 外資 + 投信連續買超天數（40分）
-    inst = institutional[institutional["stock_id"] == stock_id]
+    inst = _filter(institutional, stock_id)
     if not inst.empty:
         latest = inst.sort_values("date").iloc[-1]
         foreign_streak = latest.get("foreign_streak", 0) or 0
@@ -167,7 +174,7 @@ def score_chip(stock_id: str, institutional: pd.DataFrame,
             score += 6
 
     # 大戶持股比（30分）—— 比例越高越好
-    sh = shareholding[shareholding["stock_id"] == stock_id]
+    sh = _filter(shareholding, stock_id)
     if not sh.empty:
         big_pct = sh.sort_values("date").iloc[-1].get("big_holder_pct", 0) or 0
         if big_pct >= 70:
@@ -178,7 +185,7 @@ def score_chip(stock_id: str, institutional: pd.DataFrame,
             score += 10
 
     # 融資水位（30分）—— 增幅越小越好（融資高位=危險）
-    mg = margin[margin["stock_id"] == stock_id]
+    mg = _filter(margin, stock_id)
     if not mg.empty:
         chg = mg.sort_values("date").iloc[-1].get("margin_chg_pct", 0) or 0
         if chg <= -0.05:          # 融資減少 > 5%
@@ -199,7 +206,7 @@ def score_chip(stock_id: str, institutional: pd.DataFrame,
 def score_momentum(stock_id: str, price: pd.DataFrame) -> float:
     score = 0.0
 
-    px = price[price["stock_id"] == stock_id].sort_values("date")
+    px = _filter(price, stock_id).sort_values("date")
     if px.empty:
         return 0.0
 

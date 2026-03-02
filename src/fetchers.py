@@ -482,8 +482,8 @@ def fetch_cashflow(universe: set[str], **_) -> pd.DataFrame:
                 "stock_id":   r["stock_id"],
                 "year":       int(r["date"].year),
                 "quarter":    (int(r["date"].month) - 1) // 3 + 1,
-                "operating_cf": float(r.get("operating_cf", 0) or 0),
-                "net_income": float(r.get("net_income", 0) or 0),
+                "operating_cf": int(round(float(r.get("operating_cf", 0) or 0))),
+                "net_income": int(round(float(r.get("net_income", 0) or 0))),
                 "ocf_quality": round(float(r.get("ocf_quality", 0) or 0), 4),
             }
             for _, r in cf.iterrows()
@@ -496,6 +496,10 @@ def fetch_cashflow(universe: set[str], **_) -> pd.DataFrame:
 # ────────────────────────────────────────────────
 
 def fetch_shareholding(universe: set[str], days: int = 30) -> pd.DataFrame:
+    """
+    FinMind TaiwanStockShareholding 實際回傳的是外資持股狀況。
+    使用 ForeignInvestmentSharesRatio（外資持股比）作為大戶集中度指標。
+    """
     all_rows = []
     start = _date(days)
     for sid in sorted(universe):
@@ -506,33 +510,26 @@ def fetch_shareholding(universe: set[str], days: int = 30) -> pd.DataFrame:
             time.sleep(0.2)
 
     if not all_rows:
-        logger.warning("股權分散：FinMind 免費版無資料，此維度跳過")
+        logger.warning("股權分散：FinMind 無資料，此維度跳過")
         return pd.DataFrame()
 
     df = pd.DataFrame(all_rows)
     logger.debug("股權分散欄位: %s", list(df.columns))
 
-    # 自動找持股比例欄與分級欄（欄位名稱視 FinMind 版本而異）
-    pct_col   = next((c for c in df.columns if "percent" in c.lower()), None)
-    level_col = next((c for c in df.columns
-                      if "level" in c.lower() or "Level" in c), None)
-
-    if pct_col is None or level_col is None:
-        logger.warning("股權分散：欄位不符預期 %s，跳過", list(df.columns))
+    # 用外資持股比（ForeignInvestmentSharesRatio）作為大戶集中度代理指標
+    ratio_col = next((c for c in df.columns
+                      if "ForeignInvestmentSharesRatio" in c
+                      or ("Foreign" in c and "Ratio" in c and "Upper" not in c
+                          and "Remaining" not in c)), None)
+    if ratio_col is None:
+        logger.warning("股權分散：找不到外資持股比欄位 %s，跳過", list(df.columns))
         return pd.DataFrame()
 
-    df["percent"] = pd.to_numeric(df[pct_col], errors="coerce").fillna(0)
-    df["date"]    = pd.to_datetime(df["date"])
+    df["big_holder_pct"] = pd.to_numeric(df[ratio_col], errors="coerce").fillna(0)
+    df["date"] = pd.to_datetime(df["date"])
+    df["stock_id"] = df["stock_id"].astype(str)
 
-    big_levels = [l for l in df[level_col].unique()
-                  if any(x in str(l) for x in
-                         ["400001", "600001", "800001", "1000001", "over"])]
-    big_pct = (df[df[level_col].isin(big_levels)]
-               .groupby(["date", "stock_id"])["percent"]
-               .sum().reset_index()
-               .rename(columns={"percent": "big_holder_pct"}))
-
-    latest = big_pct[big_pct["date"] == big_pct["date"].max()]
+    latest = df[df["date"] == df["date"].max()][["stock_id", "date", "big_holder_pct"]].copy()
     db.upsert("weekly_shareholding", [
         {
             "stock_id": r["stock_id"],
