@@ -58,35 +58,56 @@ def _twse_get(url: str) -> dict:
 
 
 # ────────────────────────────────────────────────
-# 1. 股價（yfinance 批次，一次全取）
+# 1. 股價（yfinance 分批下載，避免限速）
 # ────────────────────────────────────────────────
+
+_YF_BATCH     = 10   # 每批股票數
+_YF_BATCH_DLY = 3.0  # 批次間隔（秒）
 
 def fetch_price(universe: set[str], days: int = 90) -> pd.DataFrame:
     tickers = [f"{sid}{_YF_SUFFIX}" for sid in sorted(universe)]
     start   = _date(days)
+    logger.info("yfinance 下載 %d 支股票價格（分批 %d 支）…",
+                len(tickers), _YF_BATCH)
 
-    logger.info("yfinance 下載 %d 支股票價格 (start=%s)…", len(tickers), start)
-    raw = yf.download(tickers, start=start, auto_adjust=True,
-                      group_by="ticker", threads=True, progress=False)
-
-    if raw.empty:
-        logger.warning("yfinance 回傳空值")
-        return pd.DataFrame()
-
+    # 分批下載，避免 YFRateLimitError
     frames = []
-    for sid in sorted(universe):
-        t = f"{sid}{_YF_SUFFIX}"
+    for i in range(0, len(tickers), _YF_BATCH):
+        batch = tickers[i:i + _YF_BATCH]
         try:
-            df = raw[t].dropna(subset=["Close"]).copy()
-        except KeyError:
+            raw = yf.download(batch, start=start, auto_adjust=True,
+                              group_by="ticker", threads=False, progress=False)
+        except Exception as e:
+            logger.warning("yfinance 批次 %d-%d 失敗: %s", i, i + _YF_BATCH, e)
+            time.sleep(_YF_BATCH_DLY)
             continue
-        df.index = pd.to_datetime(df.index)
-        df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
-                                 "Close": "close", "Volume": "volume"})
-        df["stock_id"] = sid
-        df["date"] = df.index
-        frames.append(df[["stock_id", "date", "open", "high", "low",
-                           "close", "volume"]])
+
+        if raw.empty:
+            time.sleep(_YF_BATCH_DLY)
+            continue
+
+        for ticker in batch:
+            sid = ticker.replace(_YF_SUFFIX, "")
+            try:
+                # 單支或多支下載時 DataFrame 結構不同
+                if len(batch) == 1:
+                    df = raw.copy()
+                else:
+                    df = raw[ticker].copy()
+                df = df.dropna(subset=["Close"])
+            except KeyError:
+                continue
+            df.index = pd.to_datetime(df.index)
+            df = df.rename(columns={"Open": "open", "High": "high",
+                                    "Low": "low", "Close": "close",
+                                    "Volume": "volume"})
+            df["stock_id"] = sid
+            df["date"] = df.index
+            frames.append(df[["stock_id", "date", "open", "high", "low",
+                               "close", "volume"]])
+
+        logger.info("價格進度：%d / %d", min(i + _YF_BATCH, len(tickers)), len(tickers))
+        time.sleep(_YF_BATCH_DLY)
 
     if not frames:
         return pd.DataFrame()
