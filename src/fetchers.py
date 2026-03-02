@@ -1,346 +1,502 @@
 """
-所有 FinMind 資料集的抓取函式。
-策略：FinMind 免費版需逐支股票查詢（帶 data_id），加小延遲避免限速。
-50支 × 9資料集 ≈ 450 次/週，在免費版 600次/日 內。
+資料抓取模組 v2（完全免費方案）
+  股價 + 財務報表 : yfinance
+  三大法人 + 融資  : TWSE Open API
+  月營收          : FinMind 免費嘗試（失敗則跳過）
 """
 import time
 import logging
 from datetime import date, timedelta
+import requests
 import pandas as pd
-from src import finmind, db
+import yfinance as yf
+from src import db, finmind
 
 logger = logging.getLogger(__name__)
 
-_API_DELAY = 0.3  # 每次 API 呼叫間隔（秒）
+# ─── 設定 ───────────────────────────────────────
+_TWSE_DELAY  = 0.6   # TWSE API 每次請求間隔（秒）
+_YF_DELAY    = 0.3   # yfinance 個股財報間隔
+_YF_SUFFIX   = ".TW" # 台灣上市股票後綴
 
 
 def _date(days_ago: int = 0) -> str:
     return (date.today() - timedelta(days=days_ago)).strftime("%Y-%m-%d")
 
 
-def _fetch_for_universe(dataset: str, universe: set[str],
-                        start_date: str, end_date: str = "") -> list[dict]:
-    """逐支股票查詢並合併結果，避免免費版 400 錯誤。"""
-    all_rows = []
-    for stock_id in sorted(universe):
-        rows = finmind.fetch(dataset, start_date=start_date,
-                             end_date=end_date, stock_id=stock_id)
-        all_rows.extend(rows)
-        time.sleep(_API_DELAY)
-    logger.info("%s：共取得 %d 筆（%d 支股票）", dataset, len(all_rows), len(universe))
-    return all_rows
+def _trading_dates(n: int) -> list[str]:
+    """取最近 n 個「可能的交易日」（週一~五），格式 YYYYMMDD。"""
+    result, d = [], date.today() - timedelta(days=1)
+    while len(result) < n:
+        if d.weekday() < 5:
+            result.append(d.strftime("%Y%m%d"))
+        d -= timedelta(days=1)
+    return result
 
 
-# ─────────────────────────────────────────────
-# 1. 還原股價（每日）
-# ─────────────────────────────────────────────
+def _clean_num(s) -> float:
+    """移除千分位逗號並轉 float。"""
+    try:
+        return float(str(s).replace(",", "").replace("--", "0").strip() or 0)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+# ────────────────────────────────────────────────
+# TWSE API 基礎函式
+# ────────────────────────────────────────────────
+
+def _twse_get(url: str) -> dict:
+    try:
+        r = requests.get(url, timeout=20,
+                         headers={"User-Agent": "Mozilla/5.0"})
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        logger.debug("TWSE 請求失敗: %s | %s", url, e)
+        return {}
+
+
+# ────────────────────────────────────────────────
+# 1. 股價（yfinance 批次，一次全取）
+# ────────────────────────────────────────────────
 
 def fetch_price(universe: set[str], days: int = 90) -> pd.DataFrame:
-    """抓取還原股價，計算 5/20/60 MA。"""
-    rows = _fetch_for_universe("TaiwanStockPriceAdj", universe, _date(days))
-    if not rows:
+    tickers = [f"{sid}{_YF_SUFFIX}" for sid in sorted(universe)]
+    start   = _date(days)
+
+    logger.info("yfinance 下載 %d 支股票價格 (start=%s)…", len(tickers), start)
+    raw = yf.download(tickers, start=start, auto_adjust=True,
+                      group_by="ticker", threads=True, progress=False)
+
+    if raw.empty:
+        logger.warning("yfinance 回傳空值")
         return pd.DataFrame()
 
-    df = pd.DataFrame(rows)
-    df["date"] = pd.to_datetime(df["date"])
-    df["close"] = pd.to_numeric(df["close"], errors="coerce")
-    # FinMind 欄位名：Trading Volume
-    vol_col = next((c for c in df.columns if "Volume" in c or c == "volume"), None)
-    df["volume"] = pd.to_numeric(df[vol_col], errors="coerce") if vol_col else 0
+    frames = []
+    for sid in sorted(universe):
+        t = f"{sid}{_YF_SUFFIX}"
+        try:
+            df = raw[t].dropna(subset=["Close"]).copy()
+        except KeyError:
+            continue
+        df.index = pd.to_datetime(df.index)
+        df = df.rename(columns={"Open": "open", "High": "high", "Low": "low",
+                                 "Close": "close", "Volume": "volume"})
+        df["stock_id"] = sid
+        df["date"] = df.index
+        frames.append(df[["stock_id", "date", "open", "high", "low",
+                           "close", "volume"]])
 
-    df = df.sort_values(["stock_id", "date"])
+    if not frames:
+        return pd.DataFrame()
+
+    combined = pd.concat(frames).sort_values(["stock_id", "date"])
+    combined["close"] = pd.to_numeric(combined["close"], errors="coerce")
+
     for ma, win in [("ma5", 5), ("ma20", 20), ("ma60", 60)]:
-        df[ma] = df.groupby("stock_id")["close"].transform(
+        combined[ma] = combined.groupby("stock_id")["close"].transform(
             lambda x, w=win: x.rolling(w, min_periods=1).mean()
         )
 
-    latest = df[df["date"] == df["date"].max()].copy()
+    latest = combined[combined["date"] == combined["date"].max()].copy()
     db.upsert("daily_price", [
         {
             "stock_id": r["stock_id"],
             "date": r["date"].strftime("%Y-%m-%d"),
-            "open": float(r.get("open", 0) or 0),
-            "high": float(r.get("max", 0) or 0),
-            "low": float(r.get("min", 0) or 0),
-            "close": float(r["close"] or 0),
-            "volume": int(r["volume"] or 0),
+            "open": round(float(r.get("open", 0) or 0), 2),
+            "high": round(float(r.get("high", 0) or 0), 2),
+            "low": round(float(r.get("low", 0) or 0), 2),
+            "close": round(float(r["close"] or 0), 2),
+            "volume": int(r.get("volume", 0) or 0),
             "ma5": round(float(r["ma5"] or 0), 2),
             "ma20": round(float(r["ma20"] or 0), 2),
             "ma60": round(float(r["ma60"] or 0), 2),
         }
         for _, r in latest.iterrows()
     ])
-    return df
+    logger.info("股價：%d 支，最新日期 %s", combined["stock_id"].nunique(),
+                combined["date"].max().strftime("%Y-%m-%d"))
+    return combined
 
 
-# ─────────────────────────────────────────────
-# 2. 三大法人（每日）
-# ─────────────────────────────────────────────
+# ────────────────────────────────────────────────
+# 2. 三大法人（TWSE T86，逐日抓）
+# ────────────────────────────────────────────────
+
+def _fetch_twse_institutional_one(date_str: str) -> list[dict]:
+    """抓單一交易日三大法人（date_str = YYYYMMDD）。"""
+    url  = (f"https://www.twse.com.tw/fund/T86"
+            f"?date={date_str}&selectType=ALL&response=json")
+    body = _twse_get(url)
+    if body.get("stat") != "OK" or not body.get("data"):
+        return []
+
+    fields = body["fields"]
+    rows   = []
+    for item in body["data"]:
+        d = dict(zip(fields, item))
+        rows.append(d)
+    return rows
+
+
+def _find_col(cols: list[str], *keywords: str) -> str:
+    """在欄位名稱中找含所有關鍵字的第一個。"""
+    for c in cols:
+        if all(k in c for k in keywords):
+            return c
+    return ""
+
 
 def fetch_institutional(universe: set[str], days: int = 30) -> pd.DataFrame:
-    rows = _fetch_for_universe("TaiwanStockInstitutionalInvestorsBuySell",
-                               universe, _date(days))
-    if not rows:
+    """TWSE 三大法人：抓最近 days 個交易日，計算連買/賣天數。"""
+    all_rows, trade_days = [], _trading_dates(days)
+    logger.info("TWSE 法人資料：嘗試 %d 個交易日…", len(trade_days))
+
+    for ds in trade_days:
+        raw = _fetch_twse_institutional_one(ds)
+        if not raw:
+            time.sleep(_TWSE_DELAY)
+            continue
+        cols = list(raw[0].keys())
+        f_net_col  = _find_col(cols, "外資及陸資", "買賣超") or _find_col(cols, "外資", "買賣超")
+        t_net_col  = _find_col(cols, "投信", "買賣超")
+        d_net_col  = _find_col(cols, "自營商", "買賣超")
+        id_col     = cols[0]  # 第一欄固定是代號
+
+        for r in raw:
+            sid = str(r.get(id_col, "")).strip()
+            if sid not in universe:
+                continue
+            all_rows.append({
+                "stock_id":  sid,
+                "date":      f"{ds[:4]}-{ds[4:6]}-{ds[6:]}",
+                "foreign_net": _clean_num(r.get(f_net_col, 0)),
+                "trust_net":   _clean_num(r.get(t_net_col, 0)),
+                "dealer_net":  _clean_num(r.get(d_net_col, 0)),
+            })
+        time.sleep(_TWSE_DELAY)
+
+    if not all_rows:
         return pd.DataFrame()
 
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(all_rows)
     df["date"] = pd.to_datetime(df["date"])
-    df["buy"] = pd.to_numeric(df["buy"], errors="coerce").fillna(0)
-    df["sell"] = pd.to_numeric(df["sell"], errors="coerce").fillna(0)
-    df["net"] = pd.to_numeric(df["net"], errors="coerce").fillna(0)
+    df["total_net"] = df["foreign_net"] + df["trust_net"] + df["dealer_net"]
+    df = df.sort_values(["stock_id", "date"])
 
-    pivot = df.pivot_table(index=["date", "stock_id"], columns="name",
-                           values="net", aggfunc="sum").reset_index()
-    pivot.columns.name = None
+    def calc_streak(s: pd.Series) -> pd.Series:
+        streak = [0] * len(s)
+        v = s.tolist()
+        for i in range(len(v)):
+            if v[i] > 0:
+                streak[i] = (streak[i-1] + 1) if i > 0 and streak[i-1] > 0 else 1
+            elif v[i] < 0:
+                streak[i] = (streak[i-1] - 1) if i > 0 and streak[i-1] < 0 else -1
+        return pd.Series(streak, index=s.index)
 
-    col_map = {"外資及陸資": "foreign_net", "外資": "foreign_net",
-               "投信": "trust_net", "自營商": "dealer_net"}
-    pivot = pivot.rename(columns={k: v for k, v in col_map.items() if k in pivot.columns})
-    for col in ["foreign_net", "trust_net", "dealer_net"]:
-        if col not in pivot.columns:
-            pivot[col] = 0
-    pivot["total_net"] = pivot["foreign_net"] + pivot["trust_net"] + pivot["dealer_net"]
-    pivot = pivot.sort_values(["stock_id", "date"])
+    df["foreign_streak"] = df.groupby("stock_id")["foreign_net"].transform(calc_streak)
+    df["trust_streak"]   = df.groupby("stock_id")["trust_net"].transform(calc_streak)
 
-    def calc_streak(series: pd.Series) -> pd.Series:
-        streak = [0] * len(series)
-        vals = series.tolist()
-        for i in range(len(vals)):
-            if vals[i] > 0:
-                streak[i] = (streak[i - 1] + 1) if i > 0 and streak[i - 1] > 0 else 1
-            elif vals[i] < 0:
-                streak[i] = (streak[i - 1] - 1) if i > 0 and streak[i - 1] < 0 else -1
-        return pd.Series(streak, index=series.index)
-
-    for col, streak_col in [("foreign_net", "foreign_streak"), ("trust_net", "trust_streak")]:
-        pivot[streak_col] = pivot.groupby("stock_id")[col].transform(calc_streak)
-
-    latest = pivot[pivot["date"] == pivot["date"].max()].copy()
+    latest = df[df["date"] == df["date"].max()].copy()
     db.upsert("daily_institutional", [
         {
-            "stock_id": r["stock_id"],
-            "date": r["date"].strftime("%Y-%m-%d"),
-            "foreign_net": int(r.get("foreign_net", 0) or 0),
-            "trust_net": int(r.get("trust_net", 0) or 0),
-            "dealer_net": int(r.get("dealer_net", 0) or 0),
-            "total_net": int(r.get("total_net", 0) or 0),
-            "foreign_streak": int(r.get("foreign_streak", 0) or 0),
-            "trust_streak": int(r.get("trust_streak", 0) or 0),
+            "stock_id":       r["stock_id"],
+            "date":           r["date"].strftime("%Y-%m-%d"),
+            "foreign_net":    int(r["foreign_net"]),
+            "trust_net":      int(r["trust_net"]),
+            "dealer_net":     int(r["dealer_net"]),
+            "total_net":      int(r["total_net"]),
+            "foreign_streak": int(r["foreign_streak"]),
+            "trust_streak":   int(r["trust_streak"]),
         }
         for _, r in latest.iterrows()
     ])
-    return pivot
+    logger.info("法人資料：%d 筆（%d 交易日）",
+                len(df), df["date"].nunique())
+    return df
 
 
-# ─────────────────────────────────────────────
-# 3. 融資融券（每日）
-# ─────────────────────────────────────────────
+# ────────────────────────────────────────────────
+# 3. 融資融券（TWSE MI_MARGN，逐日抓）
+# ────────────────────────────────────────────────
 
-def fetch_margin(universe: set[str], days: int = 60) -> pd.DataFrame:
-    rows = _fetch_for_universe("TaiwanStockMarginPurchaseShortSale",
-                               universe, _date(days))
-    if not rows:
+def fetch_margin(universe: set[str], days: int = 45) -> pd.DataFrame:
+    """TWSE 融資融券：計算與 20 交易日前的餘額變化率。"""
+    all_rows, trade_days = [], _trading_dates(days)
+    logger.info("TWSE 融資資料：嘗試 %d 個交易日…", len(trade_days))
+
+    for ds in trade_days:
+        url  = (f"https://www.twse.com.tw/exchangeReport/MI_MARGN"
+                f"?date={ds}&selectType=ALL&response=json")
+        body = _twse_get(url)
+        if body.get("stat") != "OK" or not body.get("data"):
+            time.sleep(_TWSE_DELAY)
+            continue
+        fields = body["fields"]
+        id_col = fields[0]
+
+        margin_bal_col = _find_col(fields, "融資", "今日餘額")
+        short_bal_col  = _find_col(fields, "融券", "今日餘額")
+
+        for item in body["data"]:
+            d = dict(zip(fields, item))
+            sid = str(d.get(id_col, "")).strip()
+            if sid not in universe:
+                continue
+            all_rows.append({
+                "stock_id":       sid,
+                "date":           f"{ds[:4]}-{ds[4:6]}-{ds[6:]}",
+                "margin_balance": _clean_num(d.get(margin_bal_col, 0)),
+                "short_balance":  _clean_num(d.get(short_bal_col, 0)),
+            })
+        time.sleep(_TWSE_DELAY)
+
+    if not all_rows:
         return pd.DataFrame()
 
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(all_rows)
     df["date"] = pd.to_datetime(df["date"])
-    for col in ["MarginPurchaseBalance", "ShortSaleBalance"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
-
     df = df.sort_values(["stock_id", "date"])
-    df["margin_balance_prev20"] = df.groupby("stock_id")["MarginPurchaseBalance"].transform(
+
+    df["margin_prev20"] = df.groupby("stock_id")["margin_balance"].transform(
         lambda x: x.shift(20)
     )
     df["margin_chg_pct"] = (
-        (df["MarginPurchaseBalance"] - df["margin_balance_prev20"])
-        / df["margin_balance_prev20"].replace(0, float("nan"))
+        (df["margin_balance"] - df["margin_prev20"])
+        / df["margin_prev20"].replace(0, float("nan"))
     ).fillna(0)
 
     latest = df[df["date"] == df["date"].max()].copy()
     db.upsert("daily_margin", [
         {
-            "stock_id": r["stock_id"],
-            "date": r["date"].strftime("%Y-%m-%d"),
-            "margin_balance": int(r.get("MarginPurchaseBalance", 0) or 0),
-            "short_balance": int(r.get("ShortSaleBalance", 0) or 0),
-            "margin_chg_pct": round(float(r.get("margin_chg_pct", 0) or 0), 4),
+            "stock_id":       r["stock_id"],
+            "date":           r["date"].strftime("%Y-%m-%d"),
+            "margin_balance": int(r["margin_balance"]),
+            "short_balance":  int(r["short_balance"]),
+            "margin_chg_pct": round(float(r["margin_chg_pct"]), 4),
         }
         for _, r in latest.iterrows()
     ])
+    logger.info("融資資料：%d 筆", len(df))
     return df
 
 
-# ─────────────────────────────────────────────
-# 4. 月營收（每週）
-# ─────────────────────────────────────────────
+# ────────────────────────────────────────────────
+# 4. 月營收（FinMind 免費嘗試）
+# ────────────────────────────────────────────────
 
 def fetch_revenue(universe: set[str], months: int = 6) -> pd.DataFrame:
-    rows = _fetch_for_universe("TaiwanStockMonthRevenue",
-                               universe, _date(months * 31))
-    if not rows:
+    """嘗試用 FinMind 抓月營收；若需付費則回傳空 DataFrame。"""
+    all_rows = []
+    start = _date(months * 31)
+    for sid in sorted(universe):
+        rows = finmind.fetch("TaiwanStockMonthRevenue",
+                             start_date=start, stock_id=sid)
+        all_rows.extend(rows)
+        if rows:
+            time.sleep(0.2)
+
+    if not all_rows:
+        logger.warning("月營收：FinMind 免費版無資料，此維度評分將跳過")
         return pd.DataFrame()
 
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(all_rows)
     df["revenue"] = pd.to_numeric(df["revenue"], errors="coerce").fillna(0)
-    df["date"] = pd.to_datetime(df["date"])
+    df["date"]    = pd.to_datetime(df["date"])
     df = df.sort_values(["stock_id", "date"])
     df["revenue_mom"] = df.groupby("stock_id")["revenue"].pct_change() * 100
     df["revenue_yoy"] = df.groupby("stock_id")["revenue"].pct_change(12) * 100
 
     db.upsert("monthly_revenue", [
         {
-            "stock_id": r["stock_id"],
-            "year": int(r["date"].year),
-            "month": int(r["date"].month),
-            "revenue": int(r["revenue"]),
+            "stock_id":    r["stock_id"],
+            "year":        int(r["date"].year),
+            "month":       int(r["date"].month),
+            "revenue":     int(r["revenue"]),
             "revenue_mom": round(float(r.get("revenue_mom", 0) or 0), 2),
             "revenue_yoy": round(float(r.get("revenue_yoy", 0) or 0), 2),
         }
         for _, r in df.iterrows()
     ])
+    logger.info("月營收：%d 筆", len(df))
     return df
 
 
-# ─────────────────────────────────────────────
-# 5. 損益表（季度）
-# ─────────────────────────────────────────────
+# ────────────────────────────────────────────────
+# 5–7. 財務報表（yfinance 逐股）
+# ────────────────────────────────────────────────
 
-def fetch_income(universe: set[str], days: int = 400) -> pd.DataFrame:
-    rows = _fetch_for_universe("TaiwanStockFinancialStatements",
-                               universe, _date(days))
-    if not rows:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(rows)
-    df["value"] = pd.to_numeric(df["value"], errors="coerce")
-    wanted = {"EPS", "毛利率", "營業利益率", "稅後淨利率", "每股盈餘"}
-    df = df[df["type"].isin(wanted)]
-
-    pivot = df.pivot_table(index=["date", "stock_id"], columns="type",
-                           values="value", aggfunc="last").reset_index()
-    pivot.columns.name = None
-    pivot["date"] = pd.to_datetime(pivot["date"])
-    if "每股盈餘" in pivot.columns and "EPS" not in pivot.columns:
-        pivot["EPS"] = pivot["每股盈餘"]
-
-    pivot = pivot.sort_values(["stock_id", "date"])
-    pivot["eps_qoq"] = pivot.groupby("stock_id")["EPS"].pct_change() * 100
-
-    db.upsert("quarterly_income", [
-        {
-            "stock_id": r["stock_id"],
-            "year": int(r["date"].year),
-            "quarter": (int(r["date"].month) - 1) // 3 + 1,
-            "eps": float(r.get("EPS", 0) or 0),
-            "gross_margin": float(r.get("毛利率", 0) or 0),
-            "operating_margin": float(r.get("營業利益率", 0) or 0),
-            "net_margin": float(r.get("稅後淨利率", 0) or 0),
-            "eps_qoq": round(float(r.get("eps_qoq", 0) or 0), 2),
-        }
-        for _, r in pivot.iterrows()
-    ])
-    return pivot
+def _safe_row(stmt, *candidates) -> pd.Series:
+    """從 yfinance 財報 DataFrame 取第一個找到的指標行。"""
+    if stmt is None or stmt.empty:
+        return pd.Series(dtype=float)
+    for name in candidates:
+        for idx in stmt.index:
+            if name.lower() in str(idx).lower():
+                return pd.to_numeric(stmt.loc[idx], errors="coerce")
+    return pd.Series(dtype=float)
 
 
-# ─────────────────────────────────────────────
-# 6. 資產負債表（季度）
-# ─────────────────────────────────────────────
+def _yf_financials(universe: set[str]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """一次抓全部 50 支的季度損益/資負/現金流，回傳三個 DataFrame。"""
+    inc_rows, bal_rows, cf_rows = [], [], []
 
-def fetch_balance_sheet(universe: set[str], days: int = 400) -> pd.DataFrame:
-    rows = _fetch_for_universe("TaiwanStockBalanceSheet", universe, _date(days))
-    if not rows:
-        return pd.DataFrame()
+    for sid in sorted(universe):
+        try:
+            tkr = yf.Ticker(f"{sid}{_YF_SUFFIX}")
 
-    df = pd.DataFrame(rows)
-    df["value"] = pd.to_numeric(df["value"], errors="coerce")
-    wanted = {"負債占資產比率", "流動比率", "速動比率", "負債比率"}
-    df = df[df["type"].isin(wanted)]
+            # ── 損益表 ──
+            inc = tkr.quarterly_income_stmt
+            rev  = _safe_row(inc, "Total Revenue", "Operating Revenue")
+            gp   = _safe_row(inc, "Gross Profit")
+            oi   = _safe_row(inc, "Operating Income", "EBIT")
+            ni   = _safe_row(inc, "Net Income")
+            eps  = _safe_row(inc, "Basic EPS", "Diluted EPS")
 
-    pivot = df.pivot_table(index=["date", "stock_id"], columns="type",
-                           values="value", aggfunc="last").reset_index()
-    pivot.columns.name = None
-    pivot["date"] = pd.to_datetime(pivot["date"])
-    for col in ["負債占資產比率", "負債比率"]:
-        if col in pivot.columns:
-            pivot["debt_ratio"] = pivot[col]
-            break
+            for col in (rev.index if not rev.empty else pd.Index([])):
+                rv = rev.get(col, 0) or 0
+                gm = (gp.get(col, 0) / rv * 100) if rv else 0
+                om = (oi.get(col, 0) / rv * 100) if rv else 0
+                nm = (ni.get(col, 0) / rv * 100) if rv else 0
+                ep = float(eps.get(col, 0) or 0)
+                inc_rows.append({
+                    "stock_id": sid, "date": pd.to_datetime(col),
+                    "eps": ep, "gross_margin": round(gm, 2),
+                    "operating_margin": round(om, 2), "net_margin": round(nm, 2),
+                })
 
-    db.upsert("quarterly_balance", [
-        {
-            "stock_id": r["stock_id"],
-            "year": int(r["date"].year),
-            "quarter": (int(r["date"].month) - 1) // 3 + 1,
-            "debt_ratio": float(r.get("debt_ratio", 0) or 0),
-            "current_ratio": float(r.get("流動比率", 0) or 0),
-            "quick_ratio": float(r.get("速動比率", 0) or 0),
-        }
-        for _, r in pivot.iterrows()
-    ])
-    return pivot
+            # ── 資產負債表 ──
+            bs  = tkr.quarterly_balance_sheet
+            ta  = _safe_row(bs, "Total Assets")
+            tl  = _safe_row(bs, "Total Liabilities Net Minority Interest", "Total Liabilities")
+            ca  = _safe_row(bs, "Current Assets")
+            cl  = _safe_row(bs, "Current Liabilities")
 
+            for col in (ta.index if not ta.empty else pd.Index([])):
+                ta_ = ta.get(col, 0) or 0
+                tl_ = tl.get(col, 0) or 0
+                ca_ = ca.get(col, 0) or 0
+                cl_ = cl.get(col, 0) or 0
+                dr  = (tl_ / ta_ * 100) if ta_ else 0
+                cr  = (ca_ / cl_) if cl_ else 0
+                bal_rows.append({
+                    "stock_id": sid, "date": pd.to_datetime(col),
+                    "debt_ratio": round(dr, 2), "current_ratio": round(cr, 2),
+                    "quick_ratio": round(cr, 2),  # 簡化：速動比 ≈ 流動比
+                })
 
-# ─────────────────────────────────────────────
-# 7. 現金流量表（季度）
-# ─────────────────────────────────────────────
+            # ── 現金流量表 ──
+            cfst = tkr.quarterly_cashflow
+            ocf  = _safe_row(cfst, "Operating Cash Flow")
+            ni2  = _safe_row(cfst, "Net Income", "Net Income From Continuing Operations")
 
-def fetch_cashflow(universe: set[str], days: int = 400) -> pd.DataFrame:
-    rows = _fetch_for_universe("TaiwanStockCashFlowsStatement",
-                               universe, _date(days))
-    if not rows:
-        return pd.DataFrame()
+            for col in (ocf.index if not ocf.empty else pd.Index([])):
+                o = float(ocf.get(col, 0) or 0)
+                n = float(ni2.get(col, 0) or 0)
+                q = (o / n) if n else 0
+                cf_rows.append({
+                    "stock_id": sid, "date": pd.to_datetime(col),
+                    "operating_cf": o, "net_income": n,
+                    "ocf_quality": round(q, 4),
+                })
 
-    df = pd.DataFrame(rows)
-    df["value"] = pd.to_numeric(df["value"], errors="coerce")
-    wanted = {"營業活動之現金流量", "本期淨利（淨損）", "稅後淨利"}
-    df = df[df["type"].isin(wanted)]
+        except Exception as e:
+            logger.debug("yfinance 財報失敗 %s: %s", sid, e)
+        time.sleep(_YF_DELAY)
 
-    pivot = df.pivot_table(index=["date", "stock_id"], columns="type",
-                           values="value", aggfunc="last").reset_index()
-    pivot.columns.name = None
-    pivot["date"] = pd.to_datetime(pivot["date"])
-    for col in ["本期淨利（淨損）", "稅後淨利"]:
-        if col in pivot.columns:
-            pivot["net_income"] = pivot[col]
-            break
-    pivot["ocf"] = pivot.get("營業活動之現金流量", pd.Series(0, index=pivot.index))
-    pivot["ocf_quality"] = (
-        pivot["ocf"] / pivot["net_income"].replace(0, float("nan"))
-    ).fillna(0)
+    def _build(rows: list[dict]) -> pd.DataFrame:
+        if not rows:
+            return pd.DataFrame()
+        df = pd.DataFrame(rows)
+        df["date"] = pd.to_datetime(df["date"])
+        df = df.sort_values(["stock_id", "date"])
+        return df
 
-    db.upsert("quarterly_cashflow", [
-        {
-            "stock_id": r["stock_id"],
-            "year": int(r["date"].year),
-            "quarter": (int(r["date"].month) - 1) // 3 + 1,
-            "operating_cf": float(r.get("ocf", 0) or 0),
-            "net_income": float(r.get("net_income", 0) or 0),
-            "ocf_quality": round(float(r.get("ocf_quality", 0) or 0), 4),
-        }
-        for _, r in pivot.iterrows()
-    ])
-    return pivot
+    return _build(inc_rows), _build(bal_rows), _build(cf_rows)
 
 
-# ─────────────────────────────────────────────
-# 8. 股權分散表（每週）
-# ─────────────────────────────────────────────
+def fetch_income(universe: set[str], **_) -> pd.DataFrame:
+    inc, _, _ = _yf_financials(universe)
+    if not inc.empty:
+        inc["eps_qoq"] = inc.groupby("stock_id")["eps"].pct_change() * 100
+        db.upsert("quarterly_income", [
+            {
+                "stock_id":         r["stock_id"],
+                "year":             int(r["date"].year),
+                "quarter":          (int(r["date"].month) - 1) // 3 + 1,
+                "eps":              float(r.get("eps", 0) or 0),
+                "gross_margin":     float(r.get("gross_margin", 0) or 0),
+                "operating_margin": float(r.get("operating_margin", 0) or 0),
+                "net_margin":       float(r.get("net_margin", 0) or 0),
+                "eps_qoq":          round(float(r.get("eps_qoq", 0) or 0), 2),
+            }
+            for _, r in inc.iterrows()
+        ])
+    return inc
+
+
+def fetch_balance_sheet(universe: set[str], **_) -> pd.DataFrame:
+    _, bal, _ = _yf_financials(universe)
+    if not bal.empty:
+        db.upsert("quarterly_balance", [
+            {
+                "stock_id":     r["stock_id"],
+                "year":         int(r["date"].year),
+                "quarter":      (int(r["date"].month) - 1) // 3 + 1,
+                "debt_ratio":   float(r.get("debt_ratio", 0) or 0),
+                "current_ratio": float(r.get("current_ratio", 0) or 0),
+                "quick_ratio":  float(r.get("quick_ratio", 0) or 0),
+            }
+            for _, r in bal.iterrows()
+        ])
+    return bal
+
+
+def fetch_cashflow(universe: set[str], **_) -> pd.DataFrame:
+    _, _, cf = _yf_financials(universe)
+    if not cf.empty:
+        db.upsert("quarterly_cashflow", [
+            {
+                "stock_id":   r["stock_id"],
+                "year":       int(r["date"].year),
+                "quarter":    (int(r["date"].month) - 1) // 3 + 1,
+                "operating_cf": float(r.get("operating_cf", 0) or 0),
+                "net_income": float(r.get("net_income", 0) or 0),
+                "ocf_quality": round(float(r.get("ocf_quality", 0) or 0), 4),
+            }
+            for _, r in cf.iterrows()
+        ])
+    return cf
+
+
+# ────────────────────────────────────────────────
+# 8. 股權分散（FinMind 免費嘗試）
+# ────────────────────────────────────────────────
 
 def fetch_shareholding(universe: set[str], days: int = 30) -> pd.DataFrame:
-    rows = _fetch_for_universe("TaiwanStockShareholding", universe, _date(days))
-    if not rows:
+    all_rows = []
+    start = _date(days)
+    for sid in sorted(universe):
+        rows = finmind.fetch("TaiwanStockShareholding",
+                             start_date=start, stock_id=sid)
+        all_rows.extend(rows)
+        if rows:
+            time.sleep(0.2)
+
+    if not all_rows:
+        logger.warning("股權分散：FinMind 免費版無資料，此維度跳過")
         return pd.DataFrame()
 
-    df = pd.DataFrame(rows)
+    df = pd.DataFrame(all_rows)
     df["percent"] = pd.to_numeric(df["percent"], errors="coerce").fillna(0)
-    df["date"] = pd.to_datetime(df["date"])
+    df["date"]    = pd.to_datetime(df["date"])
 
-    # 400張以上視為大戶（level 欄位含 400001 以上或 over 字樣）
     big_levels = [l for l in df["HoldingSharesLevel"].unique()
                   if any(x in str(l) for x in
                          ["400001", "600001", "800001", "1000001", "over"])]
-    df_big = df[df["HoldingSharesLevel"].isin(big_levels)]
-    big_pct = (df_big.groupby(["date", "stock_id"])["percent"]
+    big_pct = (df[df["HoldingSharesLevel"].isin(big_levels)]
+               .groupby(["date", "stock_id"])["percent"]
                .sum().reset_index()
                .rename(columns={"percent": "big_holder_pct"}))
 
@@ -348,7 +504,7 @@ def fetch_shareholding(universe: set[str], days: int = 30) -> pd.DataFrame:
     db.upsert("weekly_shareholding", [
         {
             "stock_id": r["stock_id"],
-            "date": r["date"].strftime("%Y-%m-%d"),
+            "date":     r["date"].strftime("%Y-%m-%d"),
             "big_holder_pct": round(float(r["big_holder_pct"]), 4),
         }
         for _, r in latest.iterrows()
@@ -356,29 +512,27 @@ def fetch_shareholding(universe: set[str], days: int = 30) -> pd.DataFrame:
     return big_pct
 
 
-# ─────────────────────────────────────────────
-# 9. 本益比 / 股淨比（每週）
-# ─────────────────────────────────────────────
+# ────────────────────────────────────────────────
+# 9. 本益比 / 股淨比（yfinance info）
+# ────────────────────────────────────────────────
 
-def fetch_valuation(universe: set[str], days: int = 30) -> pd.DataFrame:
-    rows = _fetch_for_universe("TaiwanStockPER", universe, _date(days))
-    if not rows:
-        return pd.DataFrame()
+def fetch_valuation(universe: set[str], **_) -> pd.DataFrame:
+    rows = []
+    today = date.today().strftime("%Y-%m-%d")
+    for sid in sorted(universe):
+        try:
+            info = yf.Ticker(f"{sid}{_YF_SUFFIX}").info
+            rows.append({
+                "stock_id": sid,
+                "date":     today,
+                "per":      float(info.get("trailingPE", 0) or 0),
+                "pbr":      float(info.get("priceToBook", 0) or 0),
+            })
+        except Exception:
+            pass
+        time.sleep(_YF_DELAY)
 
-    df = pd.DataFrame(rows)
-    df["date"] = pd.to_datetime(df["date"])
-    for col in ["PER", "PBR"]:
-        if col in df.columns:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    latest = df[df["date"] == df["date"].max()]
-    db.upsert("valuation", [
-        {
-            "stock_id": r["stock_id"],
-            "date": r["date"].strftime("%Y-%m-%d"),
-            "per": float(r.get("PER", 0) or 0),
-            "pbr": float(r.get("PBR", 0) or 0),
-        }
-        for _, r in latest.iterrows()
-    ])
-    return df
+    if rows:
+        db.upsert("valuation", rows)
+    logger.info("估值資料：%d 支", len(rows))
+    return pd.DataFrame(rows)

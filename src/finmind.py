@@ -32,6 +32,9 @@ def fetch(dataset: str, start_date: str, end_date: str = "",
             body = resp.json()
             if body.get("status") != 200:
                 msg = body.get("msg", "unknown error")
+                if "register" in msg.lower():
+                    logger.warning("FinMind %s 需付費訂閱，跳過", dataset)
+                    return []  # 不重試
                 logger.warning("FinMind %s 回傳非 200: %s", dataset, msg)
                 return []
             return body.get("data", [])

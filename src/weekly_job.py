@@ -40,20 +40,16 @@ def run() -> None:
     logger.info("抓取月營收（6個月）…")
     rev_df = fetchers.fetch_revenue(universe, months=6)
 
-    logger.info("抓取損益表（400日）…")
-    income_df = fetchers.fetch_income(universe, days=400)
-
-    logger.info("抓取資產負債表（400日）…")
-    balance_df = fetchers.fetch_balance_sheet(universe, days=400)
-
-    logger.info("抓取現金流量表（400日）…")
-    cashflow_df = fetchers.fetch_cashflow(universe, days=400)
+    logger.info("抓取財務報表（yfinance 損益/資負/現金流）…")
+    income_df   = fetchers.fetch_income(universe)
+    balance_df  = fetchers.fetch_balance_sheet(universe)
+    cashflow_df = fetchers.fetch_cashflow(universe)
 
     logger.info("抓取股權分散表（30日）…")
     sh_df = fetchers.fetch_shareholding(universe, days=30)
 
-    logger.info("抓取本益比（30日）…")
-    fetchers.fetch_valuation(universe, days=30)
+    logger.info("抓取本益比（yfinance）…")
+    fetchers.fetch_valuation(universe)
 
     # 3. 計算評分
     logger.info("計算評分…")
