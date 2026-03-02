@@ -510,13 +510,24 @@ def fetch_shareholding(universe: set[str], days: int = 30) -> pd.DataFrame:
         return pd.DataFrame()
 
     df = pd.DataFrame(all_rows)
-    df["percent"] = pd.to_numeric(df["percent"], errors="coerce").fillna(0)
+    logger.debug("股權分散欄位: %s", list(df.columns))
+
+    # 自動找持股比例欄與分級欄（欄位名稱視 FinMind 版本而異）
+    pct_col   = next((c for c in df.columns if "percent" in c.lower()), None)
+    level_col = next((c for c in df.columns
+                      if "level" in c.lower() or "Level" in c), None)
+
+    if pct_col is None or level_col is None:
+        logger.warning("股權分散：欄位不符預期 %s，跳過", list(df.columns))
+        return pd.DataFrame()
+
+    df["percent"] = pd.to_numeric(df[pct_col], errors="coerce").fillna(0)
     df["date"]    = pd.to_datetime(df["date"])
 
-    big_levels = [l for l in df["HoldingSharesLevel"].unique()
+    big_levels = [l for l in df[level_col].unique()
                   if any(x in str(l) for x in
                          ["400001", "600001", "800001", "1000001", "over"])]
-    big_pct = (df[df["HoldingSharesLevel"].isin(big_levels)]
+    big_pct = (df[df[level_col].isin(big_levels)]
                .groupby(["date", "stock_id"])["percent"]
                .sum().reset_index()
                .rename(columns={"percent": "big_holder_pct"}))
