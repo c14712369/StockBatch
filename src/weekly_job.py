@@ -10,6 +10,7 @@ import logging
 from datetime import date
 import pandas as pd
 from src import fetchers, scorers, notifier, db
+from src.universe import get_universe, get_universe_ids
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -20,9 +21,10 @@ def run() -> None:
     today = date.today().strftime("%Y-%m-%d")
     logger.info("═══ 週報工作開始 %s ═══", today)
 
-    # 1. 更新股票宇宙
-    universe_list = fetchers.fetch_universe()
-    universe = {s["stock_id"] for s in universe_list}
+    # 1. 載入股票宇宙（硬編碼清單，FinMind 免費版不支援 ETF API）
+    universe_list = get_universe()
+    universe = get_universe_ids()
+    db.upsert("stock_universe", universe_list)
     logger.info("股票宇宙：%d 支", len(universe))
 
     # 2. 抓取所有資料（批次，減少 API 呼叫）
