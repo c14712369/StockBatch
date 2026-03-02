@@ -36,7 +36,13 @@ def fetch(dataset: str, start_date: str, end_date: str = "",
                 return []
             return body.get("data", [])
         except requests.RequestException as exc:
-            logger.warning("FinMind 第 %d 次請求失敗 (%s): %s", attempt + 1, dataset, exc)
+            body = ""
+            try:
+                body = exc.response.text[:200] if exc.response is not None else ""
+            except Exception:
+                pass
+            logger.warning("FinMind 第 %d 次請求失敗 (%s): %s | body: %s",
+                           attempt + 1, dataset, exc, body)
             if attempt < 2:
                 time.sleep(2 ** attempt)
     return []
