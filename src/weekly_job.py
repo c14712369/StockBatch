@@ -40,10 +40,8 @@ def run() -> None:
     logger.info("抓取月營收（6個月）…")
     rev_df = fetchers.fetch_revenue(universe, months=6)
 
-    logger.info("抓取財務報表（yfinance 損益/資負/現金流）…")
-    income_df   = fetchers.fetch_income(universe)
-    balance_df  = fetchers.fetch_balance_sheet(universe)
-    cashflow_df = fetchers.fetch_cashflow(universe)
+    logger.info("抓取財務報表（yfinance 損益/資負/現金流，合併一次）…")
+    income_df, balance_df, cashflow_df = fetchers.fetch_financials(universe)
 
     logger.info("抓取股權分散表（30日）…")
     sh_df = fetchers.fetch_shareholding(universe, days=30)

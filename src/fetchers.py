@@ -437,6 +437,55 @@ def _yf_financials(universe: set[str]) -> tuple[pd.DataFrame, pd.DataFrame, pd.D
     return _build(inc_rows), _build(bal_rows), _build(cf_rows)
 
 
+def fetch_financials(universe: set[str]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """一次呼叫 yfinance 取得損益/資負/現金流，並寫入 Supabase。回傳 (income, balance, cashflow)。"""
+    inc, bal, cf = _yf_financials(universe)
+
+    if not inc.empty:
+        inc["eps_qoq"] = inc.groupby("stock_id")["eps"].pct_change() * 100
+        db.upsert("quarterly_income", [
+            {
+                "stock_id":         r["stock_id"],
+                "year":             int(r["date"].year),
+                "quarter":          (int(r["date"].month) - 1) // 3 + 1,
+                "eps":              float(r.get("eps", 0) or 0),
+                "gross_margin":     float(r.get("gross_margin", 0) or 0),
+                "operating_margin": float(r.get("operating_margin", 0) or 0),
+                "net_margin":       float(r.get("net_margin", 0) or 0),
+                "eps_qoq":          round(float(r.get("eps_qoq", 0) or 0), 2),
+            }
+            for _, r in inc.iterrows()
+        ])
+
+    if not bal.empty:
+        db.upsert("quarterly_balance", [
+            {
+                "stock_id":      r["stock_id"],
+                "year":          int(r["date"].year),
+                "quarter":       (int(r["date"].month) - 1) // 3 + 1,
+                "debt_ratio":    float(r.get("debt_ratio", 0) or 0),
+                "current_ratio": float(r.get("current_ratio", 0) or 0),
+                "quick_ratio":   float(r.get("quick_ratio", 0) or 0),
+            }
+            for _, r in bal.iterrows()
+        ])
+
+    if not cf.empty:
+        db.upsert("quarterly_cashflow", [
+            {
+                "stock_id":     r["stock_id"],
+                "year":         int(r["date"].year),
+                "quarter":      (int(r["date"].month) - 1) // 3 + 1,
+                "operating_cf": int(round(float(r.get("operating_cf", 0) or 0))),
+                "net_income":   int(round(float(r.get("net_income", 0) or 0))),
+                "ocf_quality":  round(float(r.get("ocf_quality", 0) or 0), 4),
+            }
+            for _, r in cf.iterrows()
+        ])
+
+    return inc, bal, cf
+
+
 def fetch_income(universe: set[str], **_) -> pd.DataFrame:
     inc, _, _ = _yf_financials(universe)
     if not inc.empty:
@@ -538,7 +587,7 @@ def fetch_shareholding(universe: set[str], days: int = 30) -> pd.DataFrame:
         }
         for _, r in latest.iterrows()
     ])
-    return big_pct
+    return df
 
 
 # ────────────────────────────────────────────────
