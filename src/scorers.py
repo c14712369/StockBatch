@@ -17,6 +17,11 @@ def _filter(df: pd.DataFrame, stock_id: str) -> pd.DataFrame:
     return df[df["stock_id"] == stock_id]
 
 
+def _safe_sort(df: pd.DataFrame) -> pd.DataFrame:
+    """sort_values("date") 的安全版本；空 DataFrame 或無 date 欄時直接回傳。"""
+    return df.sort_values("date") if not df.empty and "date" in df.columns else df
+
+
 # ─────────────────────────────────────────────
 # 硬性門檻
 # ─────────────────────────────────────────────
@@ -31,14 +36,14 @@ def hard_filter(stock_id: str, income: pd.DataFrame, balance: pd.DataFrame,
       3. 近 3 個月營收 YOY 未連續全部為負
     """
     # --- 1. OCF > 0 ---
-    cf = _filter(cashflow, stock_id).sort_values("date") if not cashflow.empty and "stock_id" in cashflow.columns else pd.DataFrame()
+    cf = _safe_sort(_filter(cashflow, stock_id)) if not cashflow.empty and "stock_id" in cashflow.columns else pd.DataFrame()
     if cf.empty:
         return False, "無現金流量資料"
     if cf.iloc[-1].get("operating_cf", 0) <= 0:
         return False, f"最近一季 OCF = {cf.iloc[-1].get('operating_cf', 0):,.0f}"
 
     # --- 2. 負債比 < 60% ---
-    bs = _filter(balance, stock_id).sort_values("date") if not balance.empty and "stock_id" in balance.columns else pd.DataFrame()
+    bs = _safe_sort(_filter(balance, stock_id)) if not balance.empty and "stock_id" in balance.columns else pd.DataFrame()
     if not bs.empty:
         debt_ratio = bs.iloc[-1].get("debt_ratio", 0)
         if debt_ratio > 60:
@@ -76,7 +81,7 @@ def score_profitability(stock_id: str, income: pd.DataFrame,
             score += 10
 
     # EPS QoQ 成長（30分）
-    inc = _filter(income, stock_id).sort_values("date")
+    inc = _safe_sort(_filter(income, stock_id))
     if not inc.empty:
         qoq = inc.iloc[-1].get("eps_qoq", 0) or 0
         if qoq >= 20:
@@ -106,7 +111,7 @@ def score_health(stock_id: str, balance: pd.DataFrame,
                  cashflow: pd.DataFrame) -> float:
     score = 0.0
 
-    bs = _filter(balance, stock_id).sort_values("date")
+    bs = _safe_sort(_filter(balance, stock_id))
     if not bs.empty:
         latest = bs.iloc[-1]
 
@@ -129,7 +134,7 @@ def score_health(stock_id: str, balance: pd.DataFrame,
             score += 10
 
     # OCF 品質 = OCF / 淨利（40分）
-    cf = _filter(cashflow, stock_id).sort_values("date")
+    cf = _safe_sort(_filter(cashflow, stock_id))
     if not cf.empty:
         quality = cf.iloc[-1].get("ocf_quality", 0) or 0
         if quality >= 1.2:
@@ -206,7 +211,7 @@ def score_chip(stock_id: str, institutional: pd.DataFrame,
 def score_momentum(stock_id: str, price: pd.DataFrame) -> float:
     score = 0.0
 
-    px = _filter(price, stock_id).sort_values("date")
+    px = _safe_sort(_filter(price, stock_id))
     if px.empty:
         return 0.0
 
