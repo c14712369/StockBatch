@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 _TWSE_DELAY  = 0.6   # TWSE API 每次請求間隔（秒）
 _YF_DELAY    = 0.3   # yfinance 個股財報間隔
 _YF_SUFFIX   = ".TW" # 台灣上市股票後綴
+_FM_DELAY    = 0.3   # FinMind API 每次請求間隔（秒）
 
 
 def _date(days_ago: int = 0) -> str:
@@ -68,56 +69,32 @@ def _twse_get(url: str) -> dict:
 
 
 # ────────────────────────────────────────────────
-# 1. 股價（yfinance 分批下載，避免限速）
+# 1. 股價（FinMind TaiwanStockPrice，逐股抓）
 # ────────────────────────────────────────────────
 
-_YF_BATCH     = 10   # 每批股票數
-_YF_BATCH_DLY = 3.0  # 批次間隔（秒）
-
 def fetch_price(universe: set[str], days: int = 90) -> pd.DataFrame:
-    tickers = [f"{sid}{_YF_SUFFIX}" for sid in sorted(universe)]
-    start   = _date(days)
-    logger.info("yfinance 下載 %d 支股票價格（分批 %d 支）…",
-                len(tickers), _YF_BATCH)
+    start = _date(days)
+    logger.info("FinMind 下載 %d 支股票價格（start=%s）…", len(universe), start)
 
-    # 分批下載，避免 YFRateLimitError
     frames = []
-    for i in range(0, len(tickers), _YF_BATCH):
-        batch = tickers[i:i + _YF_BATCH]
-        try:
-            raw = yf.download(batch, start=start, auto_adjust=True,
-                              group_by="ticker", threads=False, progress=False)
-        except Exception as e:
-            logger.warning("yfinance 批次 %d-%d 失敗: %s", i, i + _YF_BATCH, e)
-            time.sleep(_YF_BATCH_DLY)
+    for i, sid in enumerate(sorted(universe)):
+        rows = finmind.fetch("TaiwanStockPrice", start_date=start, stock_id=sid)
+        if not rows:
+            logger.debug("股價無資料: %s", sid)
+            time.sleep(_FM_DELAY)
             continue
-
-        if raw.empty:
-            time.sleep(_YF_BATCH_DLY)
-            continue
-
-        for ticker in batch:
-            sid = ticker.replace(_YF_SUFFIX, "")
-            try:
-                # 單支或多支下載時 DataFrame 結構不同
-                if len(batch) == 1:
-                    df = raw.copy()
-                else:
-                    df = raw[ticker].copy()
-                df = df.dropna(subset=["Close"])
-            except KeyError:
-                continue
-            df.index = pd.to_datetime(df.index)
-            df = df.rename(columns={"Open": "open", "High": "high",
-                                    "Low": "low", "Close": "close",
-                                    "Volume": "volume"})
-            df["stock_id"] = sid
-            df["date"] = df.index
-            frames.append(df[["stock_id", "date", "open", "high", "low",
-                               "close", "volume"]])
-
-        logger.info("價格進度：%d / %d", min(i + _YF_BATCH, len(tickers)), len(tickers))
-        time.sleep(_YF_BATCH_DLY)
+        df = pd.DataFrame(rows)
+        df = df.rename(columns={"max": "high", "min": "low",
+                                "Trading_Volume": "volume"})
+        df["date"] = pd.to_datetime(df["date"])
+        df = df[["stock_id", "date", "open", "high", "low", "close", "volume"]].copy()
+        for col in ["open", "high", "low", "close"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0).astype(int)
+        frames.append(df)
+        if (i + 1) % 10 == 0:
+            logger.info("價格進度：%d / %d", i + 1, len(universe))
+        time.sleep(_FM_DELAY)
 
     if not frames:
         return pd.DataFrame()
