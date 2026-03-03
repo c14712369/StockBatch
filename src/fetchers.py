@@ -16,7 +16,6 @@ from src import db, finmind
 logger = logging.getLogger(__name__)
 
 # ─── 設定 ───────────────────────────────────────
-_TWSE_DELAY  = 0.6   # TWSE API 每次請求間隔（秒）
 _YF_DELAY    = 0.3   # yfinance 個股財報間隔
 _YF_SUFFIX   = ".TW" # 台灣上市股票後綴
 _FM_DELAY    = 0.3   # FinMind API 每次請求間隔（秒）
@@ -24,16 +23,6 @@ _FM_DELAY    = 0.3   # FinMind API 每次請求間隔（秒）
 
 def _date(days_ago: int = 0) -> str:
     return (date.today() - timedelta(days=days_ago)).strftime("%Y-%m-%d")
-
-
-def _trading_dates(n: int) -> list[str]:
-    """取最近 n 個「可能的交易日」（週一~五），格式 YYYYMMDD。"""
-    result, d = [], date.today() - timedelta(days=1)
-    while len(result) < n:
-        if d.weekday() < 5:
-            result.append(d.strftime("%Y%m%d"))
-        d -= timedelta(days=1)
-    return result
 
 
 def _clean_num(s) -> float:
@@ -51,21 +40,6 @@ def _to_int(v) -> int:
         return 0 if (math.isnan(f) or math.isinf(f)) else int(round(f))
     except (TypeError, ValueError):
         return 0
-
-
-# ────────────────────────────────────────────────
-# TWSE API 基礎函式
-# ────────────────────────────────────────────────
-
-def _twse_get(url: str) -> dict:
-    try:
-        r = requests.get(url, timeout=20,
-                         headers={"User-Agent": "Mozilla/5.0"})
-        r.raise_for_status()
-        return r.json()
-    except Exception as e:
-        logger.debug("TWSE 請求失敗: %s | %s", url, e)
-        return {}
 
 
 # ────────────────────────────────────────────────
@@ -129,61 +103,37 @@ def fetch_price(universe: set[str], days: int = 90) -> pd.DataFrame:
 
 
 # ────────────────────────────────────────────────
-# 2. 三大法人（TWSE T86，逐日抓）
+# 2. 三大法人（FinMind TaiwanStockInstitutionalInvestors，逐股抓）
 # ────────────────────────────────────────────────
 
-def _fetch_twse_institutional_one(date_str: str) -> list[dict]:
-    """抓單一交易日三大法人（date_str = YYYYMMDD）。"""
-    url  = (f"https://www.twse.com.tw/fund/T86"
-            f"?date={date_str}&selectType=ALL&response=json")
-    body = _twse_get(url)
-    if body.get("stat") != "OK" or not body.get("data"):
-        return []
-
-    fields = body["fields"]
-    rows   = []
-    for item in body["data"]:
-        d = dict(zip(fields, item))
-        rows.append(d)
-    return rows
-
-
-def _find_col(cols: list[str], *keywords: str) -> str:
-    """在欄位名稱中找含所有關鍵字的第一個。"""
-    for c in cols:
-        if all(k in c for k in keywords):
-            return c
-    return ""
-
-
 def fetch_institutional(universe: set[str], days: int = 30) -> pd.DataFrame:
-    """TWSE 三大法人：抓最近 days 個交易日，計算連買/賣天數。"""
-    all_rows, trade_days = [], _trading_dates(days)
-    logger.info("TWSE 法人資料：嘗試 %d 個交易日…", len(trade_days))
+    """FinMind 三大法人：計算連買/賣天數。"""
+    start = _date(days)
+    logger.info("FinMind 法人資料：%d 支股票（start=%s）…", len(universe), start)
 
-    for ds in trade_days:
-        raw = _fetch_twse_institutional_one(ds)
-        if not raw:
-            time.sleep(_TWSE_DELAY)
-            continue
-        cols = list(raw[0].keys())
-        f_net_col  = _find_col(cols, "外資及陸資", "買賣超") or _find_col(cols, "外資", "買賣超")
-        t_net_col  = _find_col(cols, "投信", "買賣超")
-        d_net_col  = _find_col(cols, "自營商", "買賣超")
-        id_col     = cols[0]  # 第一欄固定是代號
-
-        for r in raw:
-            sid = str(r.get(id_col, "")).strip()
-            if sid not in universe:
-                continue
-            all_rows.append({
-                "stock_id":  sid,
-                "date":      f"{ds[:4]}-{ds[4:6]}-{ds[6:]}",
-                "foreign_net": _clean_num(r.get(f_net_col, 0)),
-                "trust_net":   _clean_num(r.get(t_net_col, 0)),
-                "dealer_net":  _clean_num(r.get(d_net_col, 0)),
-            })
-        time.sleep(_TWSE_DELAY)
+    all_rows = []
+    for i, sid in enumerate(sorted(universe)):
+        rows = finmind.fetch("TaiwanStockInstitutionalInvestorsBuySell",
+                             start_date=start, stock_id=sid)
+        # 回傳格式：每個機構一筆 (long format)，需聚合成每日一筆
+        by_date: dict[str, dict] = {}
+        for r in rows:
+            d = r["date"]
+            if d not in by_date:
+                by_date[d] = {"foreign_net": 0.0, "trust_net": 0.0, "dealer_net": 0.0}
+            net = float(r.get("buy", 0) or 0) - float(r.get("sell", 0) or 0)
+            name = r.get("name", "")
+            if name == "Foreign_Investor":
+                by_date[d]["foreign_net"] += net
+            elif name == "Investment_Trust":
+                by_date[d]["trust_net"] += net
+            elif name in ("Dealer_self", "Dealer_Hedging"):
+                by_date[d]["dealer_net"] += net
+        for d, vals in by_date.items():
+            all_rows.append({"stock_id": sid, "date": d, **vals})
+        if (i + 1) % 10 == 0:
+            logger.info("法人進度：%d / %d", i + 1, len(universe))
+        time.sleep(_FM_DELAY)
 
     if not all_rows:
         return pd.DataFrame()
@@ -220,45 +170,33 @@ def fetch_institutional(universe: set[str], days: int = 30) -> pd.DataFrame:
         }
         for _, r in latest.iterrows()
     ])
-    logger.info("法人資料：%d 筆（%d 交易日）",
-                len(df), df["date"].nunique())
+    logger.info("法人資料：%d 筆（%d 交易日）", len(df), df["date"].nunique())
     return df
 
 
 # ────────────────────────────────────────────────
-# 3. 融資融券（TWSE MI_MARGN，逐日抓）
+# 3. 融資融券（FinMind TaiwanStockMarginPurchaseShortSale，逐股抓）
 # ────────────────────────────────────────────────
 
 def fetch_margin(universe: set[str], days: int = 45) -> pd.DataFrame:
-    """TWSE 融資融券：計算與 20 交易日前的餘額變化率。"""
-    all_rows, trade_days = [], _trading_dates(days)
-    logger.info("TWSE 融資資料：嘗試 %d 個交易日…", len(trade_days))
+    """FinMind 融資融券：計算與 20 交易日前的餘額變化率。"""
+    start = _date(days)
+    logger.info("FinMind 融資資料：%d 支股票（start=%s）…", len(universe), start)
 
-    for ds in trade_days:
-        url  = (f"https://www.twse.com.tw/exchangeReport/MI_MARGN"
-                f"?date={ds}&selectType=ALL&response=json")
-        body = _twse_get(url)
-        if body.get("stat") != "OK" or not body.get("data"):
-            time.sleep(_TWSE_DELAY)
-            continue
-        fields = body["fields"]
-        id_col = fields[0]
-
-        margin_bal_col = _find_col(fields, "融資", "今日餘額")
-        short_bal_col  = _find_col(fields, "融券", "今日餘額")
-
-        for item in body["data"]:
-            d = dict(zip(fields, item))
-            sid = str(d.get(id_col, "")).strip()
-            if sid not in universe:
-                continue
+    all_rows = []
+    for i, sid in enumerate(sorted(universe)):
+        rows = finmind.fetch("TaiwanStockMarginPurchaseShortSale",
+                             start_date=start, stock_id=sid)
+        for r in rows:
             all_rows.append({
                 "stock_id":       sid,
-                "date":           f"{ds[:4]}-{ds[4:6]}-{ds[6:]}",
-                "margin_balance": _clean_num(d.get(margin_bal_col, 0)),
-                "short_balance":  _clean_num(d.get(short_bal_col, 0)),
+                "date":           r["date"],
+                "margin_balance": float(r.get("MarginPurchaseTodayBalance", 0) or 0),
+                "short_balance":  float(r.get("ShortSaleTodayBalance", 0) or 0),
             })
-        time.sleep(_TWSE_DELAY)
+        if (i + 1) % 10 == 0:
+            logger.info("融資進度：%d / %d", i + 1, len(universe))
+        time.sleep(_FM_DELAY)
 
     if not all_rows:
         return pd.DataFrame()
