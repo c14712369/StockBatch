@@ -50,7 +50,7 @@ def hard_filter(stock_id: str, income: pd.DataFrame, balance: pd.DataFrame,
             return False, f"負債比 {debt_ratio:.1f}% > 60%"
 
     # --- 3. 近 3 月 YOY 未全負 ---
-    rev = _filter(revenue, stock_id).sort_values("date") if not revenue.empty and "stock_id" in revenue.columns else pd.DataFrame()
+    rev = _safe_sort(_filter(revenue, stock_id)) if not revenue.empty and "stock_id" in revenue.columns else pd.DataFrame()
     if len(rev) >= 3:
         last3 = rev.tail(3)["revenue_yoy"].tolist()
         if all(v < 0 for v in last3):
@@ -68,7 +68,7 @@ def score_profitability(stock_id: str, income: pd.DataFrame,
     score = 0.0
 
     # 近 3 月平均 YOY（40分）
-    rev = _filter(revenue, stock_id).sort_values("date")
+    rev = _safe_sort(_filter(revenue, stock_id))
     if not rev.empty:
         avg_yoy = rev.tail(3)["revenue_yoy"].mean()
         if avg_yoy >= 30:
