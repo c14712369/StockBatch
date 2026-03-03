@@ -392,49 +392,9 @@ def fetch_financials(universe: set[str]) -> tuple[pd.DataFrame, pd.DataFrame, pd
 # ────────────────────────────────────────────────
 
 def fetch_shareholding(universe: set[str], days: int = 30) -> pd.DataFrame:
-    """
-    FinMind TaiwanStockShareholding 實際回傳的是外資持股狀況。
-    使用 ForeignInvestmentSharesRatio（外資持股比）作為大戶集中度指標。
-    """
-    all_rows = []
-    start = _date(days)
-    for sid in sorted(universe):
-        rows = finmind.fetch("TaiwanStockShareholding",
-                             start_date=start, stock_id=sid)
-        all_rows.extend(rows)
-        if rows:
-            time.sleep(0.2)
-
-    if not all_rows:
-        logger.warning("股權分散：FinMind 無資料，此維度跳過")
-        return pd.DataFrame()
-
-    df = pd.DataFrame(all_rows)
-    logger.debug("股權分散欄位: %s", list(df.columns))
-
-    # 用外資持股比（ForeignInvestmentSharesRatio）作為大戶集中度代理指標
-    ratio_col = next((c for c in df.columns
-                      if "ForeignInvestmentSharesRatio" in c
-                      or ("Foreign" in c and "Ratio" in c and "Upper" not in c
-                          and "Remaining" not in c)), None)
-    if ratio_col is None:
-        logger.warning("股權分散：找不到外資持股比欄位 %s，跳過", list(df.columns))
-        return pd.DataFrame()
-
-    df["big_holder_pct"] = pd.to_numeric(df[ratio_col], errors="coerce").fillna(0)
-    df["date"] = pd.to_datetime(df["date"])
-    df["stock_id"] = df["stock_id"].astype(str)
-
-    latest = df[df["date"] == df["date"].max()][["stock_id", "date", "big_holder_pct"]].copy()
-    db.upsert("weekly_shareholding", [
-        {
-            "stock_id": r["stock_id"],
-            "date":     r["date"].strftime("%Y-%m-%d"),
-            "big_holder_pct": round(float(r["big_holder_pct"]), 4),
-        }
-        for _, r in latest.iterrows()
-    ])
-    return df
+    """TaiwanStockShareholding 為付費功能，免費版跳過。籌碼集中度此維度將得 0 分。"""
+    logger.warning("股權分散：TaiwanStockShareholding 需付費，跳過")
+    return pd.DataFrame()
 
 
 # ────────────────────────────────────────────────

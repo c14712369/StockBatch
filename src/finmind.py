@@ -39,6 +39,10 @@ def fetch(dataset: str, start_date: str, end_date: str = "",
                 return []
             return body.get("data", [])
         except requests.RequestException as exc:
+            # 402 = 付費功能，直接跳過不重試
+            if exc.response is not None and exc.response.status_code == 402:
+                logger.warning("FinMind %s 需付費訂閱，跳過", dataset)
+                return []
             body = ""
             try:
                 body = exc.response.text[:200] if exc.response is not None else ""
