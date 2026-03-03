@@ -1,24 +1,18 @@
 """
-資料抓取模組 v2（完全免費方案）
-  股價 + 財務報表 : yfinance
-  三大法人 + 融資  : TWSE Open API
-  月營收          : FinMind 免費嘗試（失敗則跳過）
+資料抓取模組（全 FinMind 方案）
+  股價 / 財務報表 / 三大法人 / 融資 / 月營收 / 股權分散 : FinMind API
 """
 import math
 import time
 import logging
 from datetime import date, timedelta
-import requests
 import pandas as pd
-import yfinance as yf
 from src import db, finmind
 
 logger = logging.getLogger(__name__)
 
 # ─── 設定 ───────────────────────────────────────
-_YF_DELAY    = 0.3   # yfinance 個股財報間隔
-_YF_SUFFIX   = ".TW" # 台灣上市股票後綴
-_FM_DELAY    = 0.3   # FinMind API 每次請求間隔（秒）
+_FM_DELAY = 0.3   # FinMind API 每次請求間隔（秒）
 
 
 def _date(days_ago: int = 0) -> str:
@@ -270,199 +264,127 @@ def fetch_revenue(universe: set[str], months: int = 6) -> pd.DataFrame:
 
 
 # ────────────────────────────────────────────────
-# 5–7. 財務報表（yfinance 逐股）
+# 5–7. 財務報表（FinMind 逐股）
 # ────────────────────────────────────────────────
 
-def _safe_row(stmt, *candidates) -> pd.Series:
-    """從 yfinance 財報 DataFrame 取第一個找到的指標行。"""
-    if stmt is None or stmt.empty:
-        return pd.Series(dtype=float)
-    for name in candidates:
-        for idx in stmt.index:
-            if name.lower() in str(idx).lower():
-                return pd.to_numeric(stmt.loc[idx], errors="coerce")
-    return pd.Series(dtype=float)
+def fetch_financials(universe: set[str]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """FinMind 損益/資負/現金流，逐股抓，並寫入 Supabase。"""
+    start = _date(365 * 2)
+    logger.info("FinMind 財務報表：%d 支股票（start=%s）…", len(universe), start)
 
-
-def _yf_financials(universe: set[str]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """一次抓全部 50 支的季度損益/資負/現金流，回傳三個 DataFrame。"""
     inc_rows, bal_rows, cf_rows = [], [], []
 
-    for sid in sorted(universe):
-        try:
-            tkr = yf.Ticker(f"{sid}{_YF_SUFFIX}")
+    for i, sid in enumerate(sorted(universe)):
+        # ── 損益表 ──
+        for r in finmind.fetch("TaiwanStockFinancialStatements",
+                               start_date=start, stock_id=sid):
+            inc_rows.append({"stock_id": sid, "date": r["date"],
+                             "type": r["type"], "value": r["value"]})
+        time.sleep(_FM_DELAY)
 
-            # ── 損益表 ──
-            inc = tkr.quarterly_income_stmt
-            rev  = _safe_row(inc, "Total Revenue", "Operating Revenue")
-            gp   = _safe_row(inc, "Gross Profit")
-            oi   = _safe_row(inc, "Operating Income", "EBIT")
-            ni   = _safe_row(inc, "Net Income")
-            eps  = _safe_row(inc, "Basic EPS", "Diluted EPS")
+        # ── 資產負債表 ──
+        for r in finmind.fetch("TaiwanStockBalanceSheet",
+                               start_date=start, stock_id=sid):
+            if not r["type"].endswith("_per"):
+                bal_rows.append({"stock_id": sid, "date": r["date"],
+                                 "type": r["type"], "value": r["value"]})
+        time.sleep(_FM_DELAY)
 
-            for col in (rev.index if not rev.empty else pd.Index([])):
-                rv = rev.get(col, 0) or 0
-                gm = (gp.get(col, 0) / rv * 100) if rv else 0
-                om = (oi.get(col, 0) / rv * 100) if rv else 0
-                nm = (ni.get(col, 0) / rv * 100) if rv else 0
-                ep = float(eps.get(col, 0) or 0)
-                inc_rows.append({
-                    "stock_id": sid, "date": pd.to_datetime(col),
-                    "eps": ep, "gross_margin": round(gm, 2),
-                    "operating_margin": round(om, 2), "net_margin": round(nm, 2),
-                })
+        # ── 現金流量表 ──
+        for r in finmind.fetch("TaiwanStockCashFlowsStatement",
+                               start_date=start, stock_id=sid):
+            cf_rows.append({"stock_id": sid, "date": r["date"],
+                            "type": r["type"], "value": r["value"]})
+        time.sleep(_FM_DELAY)
 
-            # ── 資產負債表 ──
-            bs  = tkr.quarterly_balance_sheet
-            ta  = _safe_row(bs, "Total Assets")
-            tl  = _safe_row(bs, "Total Liabilities Net Minority Interest", "Total Liabilities")
-            ca  = _safe_row(bs, "Current Assets")
-            cl  = _safe_row(bs, "Current Liabilities")
+        if (i + 1) % 10 == 0:
+            logger.info("財報進度：%d / %d", i + 1, len(universe))
 
-            for col in (ta.index if not ta.empty else pd.Index([])):
-                ta_ = ta.get(col, 0) or 0
-                tl_ = tl.get(col, 0) or 0
-                ca_ = ca.get(col, 0) or 0
-                cl_ = cl.get(col, 0) or 0
-                dr  = (tl_ / ta_ * 100) if ta_ else 0
-                cr  = (ca_ / cl_) if cl_ else 0
-                bal_rows.append({
-                    "stock_id": sid, "date": pd.to_datetime(col),
-                    "debt_ratio": round(dr, 2), "current_ratio": round(cr, 2),
-                    "quick_ratio": round(cr, 2),  # 簡化：速動比 ≈ 流動比
-                })
-
-            # ── 現金流量表 ──
-            cfst = tkr.quarterly_cashflow
-            ocf  = _safe_row(cfst, "Operating Cash Flow")
-            ni2  = _safe_row(cfst, "Net Income", "Net Income From Continuing Operations")
-
-            for col in (ocf.index if not ocf.empty else pd.Index([])):
-                o = float(ocf.get(col, 0) or 0)
-                n = float(ni2.get(col, 0) or 0)
-                q = (o / n) if n else 0
-                cf_rows.append({
-                    "stock_id": sid, "date": pd.to_datetime(col),
-                    "operating_cf": o, "net_income": n,
-                    "ocf_quality": round(q, 4),
-                })
-
-        except Exception as e:
-            logger.debug("yfinance 財報失敗 %s: %s", sid, e)
-        time.sleep(_YF_DELAY)
-
-    def _build(rows: list[dict]) -> pd.DataFrame:
+    def _pivot(rows: list[dict]) -> pd.DataFrame:
         if not rows:
             return pd.DataFrame()
         df = pd.DataFrame(rows)
         df["date"] = pd.to_datetime(df["date"])
-        df = df.sort_values(["stock_id", "date"])
-        return df
+        return df.pivot_table(index=["stock_id", "date"],
+                              columns="type", values="value",
+                              aggfunc="first").reset_index()
 
-    return _build(inc_rows), _build(bal_rows), _build(cf_rows)
-
-
-def fetch_financials(universe: set[str]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """一次呼叫 yfinance 取得損益/資負/現金流，並寫入 Supabase。回傳 (income, balance, cashflow)。"""
-    inc, bal, cf = _yf_financials(universe)
-
-    if not inc.empty:
+    # ── 損益 ──
+    inc = pd.DataFrame()
+    if inc_rows:
+        pv = _pivot(inc_rows)
+        get = lambda c: pd.to_numeric(pv.get(c, 0), errors="coerce").fillna(0)
+        rev = get("Revenue")
+        inc = pv[["stock_id", "date"]].copy()
+        inc["eps"]              = get("EPS")
+        inc["gross_margin"]     = (get("GrossProfit") / rev.replace(0, float("nan")) * 100).fillna(0).round(2)
+        inc["operating_margin"] = (get("OperatingIncome") / rev.replace(0, float("nan")) * 100).fillna(0).round(2)
+        inc["net_income"]       = get("IncomeAfterTaxes")
+        inc["net_margin"]       = (inc["net_income"] / rev.replace(0, float("nan")) * 100).fillna(0).round(2)
+        inc = inc.sort_values(["stock_id", "date"])
         inc["eps_qoq"] = inc.groupby("stock_id")["eps"].pct_change(fill_method=None) * 100
         db.upsert("quarterly_income", [
-            {
-                "stock_id":         r["stock_id"],
-                "year":             int(r["date"].year),
-                "quarter":          (int(r["date"].month) - 1) // 3 + 1,
-                "eps":              float(r.get("eps", 0) or 0),
-                "gross_margin":     float(r.get("gross_margin", 0) or 0),
-                "operating_margin": float(r.get("operating_margin", 0) or 0),
-                "net_margin":       float(r.get("net_margin", 0) or 0),
-                "eps_qoq":          round(float(r.get("eps_qoq", 0) or 0), 2),
-            }
+            {"stock_id": r["stock_id"],
+             "year": int(r["date"].year), "quarter": (int(r["date"].month) - 1) // 3 + 1,
+             "eps": float(r["eps"] or 0), "gross_margin": float(r["gross_margin"] or 0),
+             "operating_margin": float(r["operating_margin"] or 0),
+             "net_margin": float(r["net_margin"] or 0),
+             "eps_qoq": round(float(r.get("eps_qoq") or 0), 2)}
             for _, r in inc.iterrows()
         ])
 
-    if not bal.empty:
+    # ── 資負 ──
+    bal = pd.DataFrame()
+    if bal_rows:
+        pv = _pivot(bal_rows)
+        get = lambda c: pd.to_numeric(pv.get(c, 0), errors="coerce").fillna(0)
+        ta = get("TotalAssets"); tl = get("Liabilities")
+        ca = get("CurrentAssets"); cl = get("CurrentLiabilities")
+        bal = pv[["stock_id", "date"]].copy()
+        bal["debt_ratio"]    = (tl / ta.replace(0, float("nan")) * 100).fillna(0).round(2)
+        bal["current_ratio"] = (ca / cl.replace(0, float("nan"))).fillna(0).round(2)
+        bal["quick_ratio"]   = bal["current_ratio"]
+        bal = bal.sort_values(["stock_id", "date"])
         db.upsert("quarterly_balance", [
-            {
-                "stock_id":      r["stock_id"],
-                "year":          int(r["date"].year),
-                "quarter":       (int(r["date"].month) - 1) // 3 + 1,
-                "debt_ratio":    float(r.get("debt_ratio", 0) or 0),
-                "current_ratio": float(r.get("current_ratio", 0) or 0),
-                "quick_ratio":   float(r.get("quick_ratio", 0) or 0),
-            }
+            {"stock_id": r["stock_id"],
+             "year": int(r["date"].year), "quarter": (int(r["date"].month) - 1) // 3 + 1,
+             "debt_ratio": float(r["debt_ratio"] or 0),
+             "current_ratio": float(r["current_ratio"] or 0),
+             "quick_ratio": float(r["quick_ratio"] or 0)}
             for _, r in bal.iterrows()
         ])
 
-    if not cf.empty:
+    # ── 現金流 ──
+    cf = pd.DataFrame()
+    if cf_rows:
+        pv = _pivot(cf_rows)
+        get = lambda c: pd.to_numeric(pv.get(c, 0), errors="coerce").fillna(0)
+        ocf = get("CashFlowsFromOperatingActivities")
+        cf = pv[["stock_id", "date"]].copy()
+        cf["operating_cf"] = ocf
+        # 從損益表補 net_income 以計算 OCF 品質
+        if not inc.empty:
+            ni_map = inc[["stock_id", "date", "net_income"]].copy()
+            cf = cf.merge(ni_map, on=["stock_id", "date"], how="left")
+            cf["net_income"] = cf["net_income"].fillna(0)
+        else:
+            cf["net_income"] = 0.0
+        cf["ocf_quality"] = cf.apply(
+            lambda r: round(r["operating_cf"] / r["net_income"], 4)
+            if r["net_income"] != 0 else 0.0, axis=1)
+        cf = cf.sort_values(["stock_id", "date"])
         db.upsert("quarterly_cashflow", [
-            {
-                "stock_id":     r["stock_id"],
-                "year":         int(r["date"].year),
-                "quarter":      (int(r["date"].month) - 1) // 3 + 1,
-                "operating_cf": _to_int(r.get("operating_cf", 0)),
-                "net_income":   _to_int(r.get("net_income", 0)),
-                "ocf_quality":  round(float(r.get("ocf_quality", 0) or 0), 4),
-            }
+            {"stock_id": r["stock_id"],
+             "year": int(r["date"].year), "quarter": (int(r["date"].month) - 1) // 3 + 1,
+             "operating_cf": _to_int(r["operating_cf"]),
+             "net_income": _to_int(r["net_income"]),
+             "ocf_quality": float(r["ocf_quality"] or 0)}
             for _, r in cf.iterrows()
         ])
 
+    logger.info("財務報表：損益 %d 筆 / 資負 %d 筆 / 現金流 %d 筆",
+                len(inc), len(bal), len(cf))
     return inc, bal, cf
-
-
-def fetch_income(universe: set[str], **_) -> pd.DataFrame:
-    inc, _, _ = _yf_financials(universe)
-    if not inc.empty:
-        inc["eps_qoq"] = inc.groupby("stock_id")["eps"].pct_change() * 100
-        db.upsert("quarterly_income", [
-            {
-                "stock_id":         r["stock_id"],
-                "year":             int(r["date"].year),
-                "quarter":          (int(r["date"].month) - 1) // 3 + 1,
-                "eps":              float(r.get("eps", 0) or 0),
-                "gross_margin":     float(r.get("gross_margin", 0) or 0),
-                "operating_margin": float(r.get("operating_margin", 0) or 0),
-                "net_margin":       float(r.get("net_margin", 0) or 0),
-                "eps_qoq":          round(float(r.get("eps_qoq", 0) or 0), 2),
-            }
-            for _, r in inc.iterrows()
-        ])
-    return inc
-
-
-def fetch_balance_sheet(universe: set[str], **_) -> pd.DataFrame:
-    _, bal, _ = _yf_financials(universe)
-    if not bal.empty:
-        db.upsert("quarterly_balance", [
-            {
-                "stock_id":     r["stock_id"],
-                "year":         int(r["date"].year),
-                "quarter":      (int(r["date"].month) - 1) // 3 + 1,
-                "debt_ratio":   float(r.get("debt_ratio", 0) or 0),
-                "current_ratio": float(r.get("current_ratio", 0) or 0),
-                "quick_ratio":  float(r.get("quick_ratio", 0) or 0),
-            }
-            for _, r in bal.iterrows()
-        ])
-    return bal
-
-
-def fetch_cashflow(universe: set[str], **_) -> pd.DataFrame:
-    _, _, cf = _yf_financials(universe)
-    if not cf.empty:
-        db.upsert("quarterly_cashflow", [
-            {
-                "stock_id":   r["stock_id"],
-                "year":       int(r["date"].year),
-                "quarter":    (int(r["date"].month) - 1) // 3 + 1,
-                "operating_cf": int(round(float(r.get("operating_cf", 0) or 0))),
-                "net_income": int(round(float(r.get("net_income", 0) or 0))),
-                "ocf_quality": round(float(r.get("ocf_quality", 0) or 0), 4),
-            }
-            for _, r in cf.iterrows()
-        ])
-    return cf
 
 
 # ────────────────────────────────────────────────
@@ -516,26 +438,10 @@ def fetch_shareholding(universe: set[str], days: int = 30) -> pd.DataFrame:
 
 
 # ────────────────────────────────────────────────
-# 9. 本益比 / 股淨比（yfinance info）
+# 9. 本益比（TaiwanStockPER 需付費，跳過）
 # ────────────────────────────────────────────────
 
 def fetch_valuation(universe: set[str], **_) -> pd.DataFrame:
-    rows = []
-    today = date.today().strftime("%Y-%m-%d")
-    for sid in sorted(universe):
-        try:
-            info = yf.Ticker(f"{sid}{_YF_SUFFIX}").info
-            rows.append({
-                "stock_id": sid,
-                "date":     today,
-                "per":      float(info.get("trailingPE", 0) or 0),
-                "pbr":      float(info.get("priceToBook", 0) or 0),
-            })
-        except Exception:
-            pass
-        time.sleep(_YF_DELAY)
-
-    if rows:
-        db.upsert("valuation", rows)
-    logger.info("估值資料：%d 支", len(rows))
-    return pd.DataFrame(rows)
+    """TaiwanStockPER 為付費功能，免費版跳過。估值不影響評分。"""
+    logger.info("估值資料：TaiwanStockPER 需付費，跳過")
+    return pd.DataFrame()
