@@ -130,3 +130,85 @@ def send_daily_report(watchlist: list[dict], date_str: str) -> None:
 
     _send("\n".join(lines))
     logger.info("日報已發送，共 %d 支", len(watchlist))
+
+
+# ─────────────────────────────────────────────
+# 晨報（開盤前局勢分析）
+# ─────────────────────────────────────────────
+
+def send_morning_briefing(us_data: list[dict], watchlist: list[dict], date_str: str) -> None:
+    """
+    us_data:  [{"name", "ticker", "close", "pct"}, ...]
+    watchlist: [{"stock_id", "stock_name", "close", "pct", "foreign_net", "trust_net"}, ...]
+    """
+    lines = [f"🌅 *今日開盤前局勢分析 {date_str}*", ""]
+
+    # 美股隔夜表現
+    if us_data:
+        lines.append("🌏 *美股隔夜收盤*")
+        for idx in us_data:
+            pct = idx["pct"]
+            arrow = "▲" if pct >= 0 else "▼"
+            sign = "+" if pct >= 0 else ""
+            lines.append(
+                f"  {arrow} *{idx['name']}*: {idx['close']:,.2f} ({sign}{pct:.2f}%)"
+            )
+
+        # 整體氛圍研判
+        sp = next((x for x in us_data if x["ticker"] == "^GSPC"), None)
+        vix = next((x for x in us_data if x["ticker"] == "^VIX"), None)
+        ewt = next((x for x in us_data if x["ticker"] == "EWT"), None)
+
+        mood = []
+        if sp:
+            if sp["pct"] >= 1.0:
+                mood.append("美股強勁上漲，市場風險偏好高")
+            elif sp["pct"] >= 0:
+                mood.append("美股小幅收紅，偏多格局")
+            elif sp["pct"] >= -1.0:
+                mood.append("美股小幅收黑，需留意")
+            else:
+                mood.append("美股重挫，市場風險偏好低")
+        if vix:
+            if vix["close"] >= 30:
+                mood.append(f"VIX={vix['close']:.1f} 恐慌偏高，操作謹慎")
+            elif vix["close"] >= 20:
+                mood.append(f"VIX={vix['close']:.1f} 適中")
+            else:
+                mood.append(f"VIX={vix['close']:.1f} 偏低，情緒穩定")
+        if ewt:
+            arrow = "▲" if ewt["pct"] >= 0 else "▼"
+            mood.append(f"台灣 EWT {arrow}{ewt['pct']:+.2f}%")
+
+        if mood:
+            lines.append("")
+            lines.append("🧭 *開盤情緒研判*")
+            for m in mood:
+                lines.append(f"  • {m}")
+        lines.append("")
+
+    # Watchlist 昨日回顧
+    if watchlist:
+        lines.append("📋 *Watchlist 昨收回顧*")
+        for s in sorted(watchlist, key=lambda x: x.get("pct", 0), reverse=True):
+            pct = s.get("pct", 0)
+            arrow = "▲" if pct >= 0 else "▼"
+            f_net = s.get("foreign_net", 0)
+            t_net = s.get("trust_net", 0)
+            chip_tag = ""
+            if f_net > 0 and t_net > 0:
+                chip_tag = " 🔥外資投信同買"
+            elif f_net > 0:
+                chip_tag = " 💹外資買超"
+            elif t_net > 0:
+                chip_tag = " 💹投信買超"
+            lines.append(
+                f"  {arrow} *{s['stock_id']}* {s['stock_name']} "
+                f"{s['close']:.1f} ({pct:+.1f}%){chip_tag}"
+            )
+        lines.append("")
+
+    lines.append("📌 _台股 09:00 開盤，注意量能與法人動向_")
+
+    _send("\n".join(lines))
+    logger.info("晨報已發送")
