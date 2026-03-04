@@ -125,3 +125,16 @@ CREATE TABLE IF NOT EXISTS weekly_scores (
     filter_reason        TEXT,
     PRIMARY KEY (stock_id, week_date)
 );
+
+-- 前瞻模擬交易紀錄 (Paper Trading)
+CREATE TABLE IF NOT EXISTS paper_trading_positions (
+    week_date            DATE         NOT NULL,
+    stock_id             VARCHAR(10)  NOT NULL,
+    entry_price          NUMERIC(10,2),
+    current_price        NUMERIC(10,2),
+    unrealized_pnl_pct   NUMERIC(8,2),  -- (current_price - entry_price) / entry_price * 100
+    status               VARCHAR(20)  DEFAULT 'open', -- 'open' 或 'closed'
+    created_at           TIMESTAMPTZ  DEFAULT NOW(),
+    updated_at           TIMESTAMPTZ  DEFAULT NOW(),
+    PRIMARY KEY (week_date, stock_id)
+);

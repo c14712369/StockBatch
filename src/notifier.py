@@ -82,14 +82,33 @@ def send_weekly_report(scores: list[dict], date_str: str) -> None:
 # 日報（籌碼 + 動能快報）
 # ─────────────────────────────────────────────
 
-def send_daily_report(watchlist: list[dict], date_str: str) -> None:
+def send_daily_report(watchlist: list[dict], date_str: str, paper_summary: list[dict] = None) -> None:
     """
     watchlist: 每支股票包含
       stock_id, stock_name, close, pct_change, volume,
       foreign_net, foreign_streak, trust_net, trust_streak,
       margin_balance, margin_chg_pct, ma_aligned (bool)
+    paper_summary: (可選) 模擬交易的績效總結，格式 [{week_date, avg_pnl_pct, best_stock:{stock_name, pnl_pct}, count}]
     """
     lines = [f"📡 *今日籌碼快報 {date_str}*", ""]
+
+    # 模擬交易績效追蹤 (Paper Trading)
+    if paper_summary:
+        lines.append("💼 *模擬投資組合績效 (每週Top10)*")
+        for summary in paper_summary:
+            week = summary['week_date']
+            avg = summary['avg_pnl_pct']
+            cnt = summary['count']
+            best = summary['best_stock']
+            
+            avg_sign = "+" if avg >= 0 else ""
+            lines.append(f"  • {week} 選股 ({cnt}檔): 均報 {avg_sign}{avg:.1f}%")
+            if best:
+                best_name = best['stock_name']
+                best_pnl = best['pnl_pct']
+                best_sign = "+" if best_pnl >= 0 else ""
+                lines.append(f"    最佳: {best_name} ({best_sign}{best_pnl:.1f}%)")
+        lines.append("")
 
     # 法人同步買超
     both_buy = [s for s in watchlist

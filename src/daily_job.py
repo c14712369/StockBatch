@@ -101,7 +101,82 @@ def run() -> None:
             "margin_chg_pct": margin_chg,
         })
 
-    notifier.send_daily_report(daily_data, today)
+    # --- 處置模擬倉位 (Paper Trading) ---
+    logger.info("結算模擬倉位(Paper Trading)...")
+    open_positions = db.select("paper_trading_positions", filters={"status": "open"})
+    paper_updates = []
+    paper_summary = []
+
+    if open_positions:
+        # 為了避免重複抓取價格，如果前面 price_df 已經有了就直接用，沒有再抓
+        # 目前抓了 watchlist 的 65 天價格，但舊的 positions 可能不在 watchlist 中
+        position_sids = {p["stock_id"] for p in open_positions}
+        missing_sids = position_sids - universe
+        
+        all_prices = price_df.copy()
+        if missing_sids:
+            logger.info("額外抓取 %d 支非本週 watchlist 的模擬倉位股票價格", len(missing_sids))
+            extra_price_df = fetchers.fetch_price(list(missing_sids), days=5)
+            all_prices = pd.concat([all_prices, extra_price_df], ignore_index=True)
+
+        # 依據週次分組統計
+        positions_by_week = {}
+        
+        # 取得股票名稱對照表
+        universe_rows = db.select("stock_universe")
+        stock_name_map = {r["stock_id"]: r.get("stock_name", r["stock_id"]) for r in universe_rows}
+        
+        for pos in open_positions:
+            sid = pos["stock_id"]
+            week_date = pos["week_date"]
+            
+            px_data = all_prices[all_prices["stock_id"] == sid].sort_values("date")
+            if not px_data.empty:
+                current_price = float(px_data.iloc[-1].get("close", 0) or 0)
+                entry_price = float(pos["entry_price"])
+                pnl_pct = ((current_price - entry_price) / entry_price * 100) if entry_price > 0 else 0.0
+                
+                # 準備寫回 DB
+                paper_updates.append({
+                    "week_date": week_date,
+                    "stock_id": sid,
+                    "entry_price": entry_price,
+                    "current_price": current_price,
+                    "unrealized_pnl_pct": round(pnl_pct, 2),
+                    "status": "open"
+                })
+                
+                # 統計用
+                if week_date not in positions_by_week:
+                    positions_by_week[week_date] = []
+                
+                stock_name = stock_name_map.get(sid, sid)
+                positions_by_week[week_date].append({
+                    "stock_id": sid,
+                    "stock_name": stock_name,
+                    "pnl_pct": pnl_pct,
+                    "current_price": current_price,
+                    "entry_price": entry_price
+                })
+
+        if paper_updates:
+            db.upsert("paper_trading_positions", paper_updates)
+
+        # 整理摘要給 Telegram (只取最近的 4 週)
+        for week in sorted(positions_by_week.keys(), reverse=True)[:4]:
+            week_pos = positions_by_week[week]
+            avg_pnl = sum(p["pnl_pct"] for p in week_pos) / len(week_pos) if week_pos else 0
+            best_stock = max(week_pos, key=lambda x: x["pnl_pct"]) if week_pos else None
+            paper_summary.append({
+                "week_date": week,
+                "avg_pnl_pct": round(avg_pnl, 2),
+                "best_stock": best_stock,
+                "count": len(week_pos)
+            })
+
+    # ------------------------------------
+
+    notifier.send_daily_report(daily_data, today, paper_summary=paper_summary)
     logger.info("═══ 日報工作完成 ═══")
 
 

@@ -63,7 +63,7 @@ def run() -> None:
         shareholding=sh_df,
     )
 
-    # 4. 存入 Supabase
+    # 4. 存入 Supabase (weekly_scores)
     week_rows = [
         {
             "stock_id": s["stock_id"],
@@ -80,6 +80,29 @@ def run() -> None:
     ]
     db.upsert("weekly_scores", week_rows)
     logger.info("已儲存 %d 筆評分到 Supabase", len(week_rows))
+
+    # 4.5 模擬倉位 (Paper Trading) - 記錄本週推薦的進場價
+    # 找出前 10 名且通過門檻的股票作為本週模擬投資組合
+    top_10 = [s for s in scores if s["passes_filter"]][:10]
+    paper_rows = []
+    for s in top_10:
+        sid = s["stock_id"]
+        # 從抓下來的價格資料找出最新一筆收盤價，當作本週起算的進場價
+        px = price_df[price_df["stock_id"] == sid].sort_values("date")
+        entry_price = float(px.iloc[-1].get("close", 0)) if not px.empty else 0.0
+        
+        paper_rows.append({
+            "week_date": today,
+            "stock_id": sid,
+            "entry_price": entry_price,
+            "current_price": entry_price,
+            "unrealized_pnl_pct": 0.0,
+            "status": "open"
+        })
+    
+    if paper_rows:
+        db.upsert("paper_trading_positions", paper_rows)
+        logger.info("已更新 %d 筆模擬倉位 (Paper Trading)", len(paper_rows))
 
     # 5. 發送週報
     notifier.send_weekly_report(scores, today)

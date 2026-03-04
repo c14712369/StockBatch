@@ -45,10 +45,12 @@ def fetch_price(universe: set[str], days: int = 90) -> pd.DataFrame:
     logger.info("FinMind 下載 %d 支股票價格（start=%s）…", len(universe), start)
 
     frames = []
+    failed_sids = set()
     for i, sid in enumerate(sorted(universe)):
         rows = finmind.fetch("TaiwanStockPrice", start_date=start, stock_id=sid)
         if not rows:
-            logger.debug("股價無資料: %s", sid)
+            logger.debug("股價無資料: %s，準備以 yfinance 備援", sid)
+            failed_sids.add(sid)
             time.sleep(_FM_DELAY)
             continue
         df = pd.DataFrame(rows)
@@ -64,11 +66,63 @@ def fetch_price(universe: set[str], days: int = 90) -> pd.DataFrame:
             logger.info("價格進度：%d / %d", i + 1, len(universe))
         time.sleep(_FM_DELAY)
 
+    # 備援機制：如果 FinMind 返回空，使用 yfinance 補齊
+    if failed_sids:
+        try:
+            import yfinance as yf
+            logger.info("FinMind 無法取得部分股價 (共 %d 檔)，啟動 yfinance 分段備援下載...", len(failed_sids))
+            
+            # 分成每 10 檔一組，避免被 Yahoo Finance 阻擋
+            sid_list = sorted(list(failed_sids))
+            chunk_size = 10
+            for i in range(0, len(sid_list), chunk_size):
+                chunk = sid_list[i : i + chunk_size]
+                tickers = [f"{sid}.TW" for sid in chunk]
+                logger.info("  正在下載組別 %d/%d: %s", (i // chunk_size) + 1, (len(sid_list)-1)//chunk_size + 1, ", ".join(chunk))
+                
+                try:
+                    yf_df = yf.download(tickers, start=start, progress=False, auto_adjust=False)
+                    if not yf_df.empty:
+                        # 處理單檔或多檔回傳格式
+                        if len(chunk) == 1:
+                            df_p = yf_df.reset_index()
+                            df_p["stock_id"] = chunk[0]
+                        else:
+                            df_p = yf_df.stack(level=1, future_stack=True).reset_index()
+                            df_p = df_p.rename(columns={"Ticker": "stock_id"})
+                        
+                        df_p = df_p.rename(columns={
+                            "Date": "date", "Open": "open", "High": "high", 
+                            "Low": "low", "Close": "close", "Volume": "volume"
+                        })
+                        df_p["stock_id"] = df_p["stock_id"].str.replace(".TW", "", regex=False)
+                        df_p["date"] = pd.to_datetime(df_p["date"])
+                        
+                        # 過濾欄位並轉換型別
+                        keep_cols = ["stock_id", "date", "open", "high", "low", "close", "volume"]
+                        df_p = df_p[[c for c in keep_cols if c in df_p.columns]].copy()
+                        for col in ["open", "high", "low", "close"]:
+                            if col in df_p.columns:
+                                df_p[col] = pd.to_numeric(df_p[col], errors="coerce")
+                        if "volume" in df_p.columns:
+                            df_p["volume"] = pd.to_numeric(df_p["volume"], errors="coerce").fillna(0).astype(int)
+                        
+                        frames.append(df_p)
+                except Exception as e:
+                    logger.warning("yfinance 該組備援失敗: %s", e)
+                
+                time.sleep(1.5) # 稍微停頓
+        except ImportError:
+            logger.warning("yfinance 未安裝，無法進行股價備援")
     if not frames:
+        logger.error("無法取得任何股價資料 (FinMind 與 yfinance 皆失敗)，回測中止。")
         return pd.DataFrame()
 
     combined = pd.concat(frames).sort_values(["stock_id", "date"])
     combined["close"] = pd.to_numeric(combined["close"], errors="coerce")
+
+    if combined.empty or "date" not in combined.columns:
+        return pd.DataFrame()
 
     for ma, win in [("ma5", 5), ("ma20", 20), ("ma60", 60)]:
         combined[ma] = combined.groupby("stock_id")["close"].transform(

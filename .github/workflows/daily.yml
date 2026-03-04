@@ -29,7 +29,7 @@ jobs:
       - name: Run morning briefing (07:30 TST)
         if: github.event_name == 'schedule' && contains(github.event.schedule, '30 23')
         env:
-          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+          FINMIND_TOKENS: ${{ secrets.FINMIND_TOKENS }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
@@ -39,7 +39,7 @@ jobs:
       - name: Run daily report (18:30 TST)
         if: github.event_name == 'workflow_dispatch' || contains(github.event.schedule, '30 10')
         env:
-          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+          FINMIND_TOKENS: ${{ secrets.FINMIND_TOKENS }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
