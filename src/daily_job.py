@@ -23,7 +23,7 @@ def _get_watchlist() -> list[dict]:
 
     df = pd.DataFrame(rows)
     latest_week = df["week_date"].max()
-    top = (df[(df["week_date"] == latest_week) & (df["passes_filter"].astype(str) == "true")]
+    top = (df[(df["week_date"] == latest_week) & (df["passes_filter"] == True)]
            .sort_values("total_score", ascending=False)
            .head(10))
 
