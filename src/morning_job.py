@@ -1,75 +1,38 @@
-﻿"""
+"""
 晨報工作：平日 08:30 TST 執行（台股開盤前）
-  1. 抓取美股三大指數昨夜收盤表現
-  2. 取得本週 watchlist
-  3. 抓取 watchlist 昨日收盤資料
-  4. 組合今日開盤前局勢分析並發送 Telegram
+完全讀 Supabase，不打任何外部 API，不占 FinMind 額度。
+昨日 18:30 日報已將 daily_price / daily_institutional / daily_margin 存入 Supabase。
 """
 import logging
-from datetime import date, timedelta
-import yfinance as yf
+from datetime import date
 import pandas as pd
-from src import fetchers, notifier, db
+from src import notifier, db
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 
-US_INDICES = {
-    "^GSPC": "S&P 500",
-    "^IXIC": "Nasdaq",
-    "^DJI":  "道瓊",
-    "^VIX":  "VIX 恐慌指數",
-}
-
-TW_PROXY = {
-    "EWT": "台灣 ETF (EWT)",
-}
-
-
-def _fetch_us_market() -> list[dict]:
-    """抓取美股主要指數昨夜收盤與漲跌幅。"""
-    result = []
-    all_tickers = {**US_INDICES, **TW_PROXY}
-    for ticker, name in all_tickers.items():
-        try:
-            hist = yf.Ticker(ticker).history(period="2d")
-            if len(hist) < 2:
-                hist = yf.Ticker(ticker).history(period="5d")
-            if len(hist) < 2:
-                continue
-            latest = hist.iloc[-1]
-            prev = hist.iloc[-2]
-            close = float(latest["Close"])
-            prev_close = float(prev["Close"])
-            pct = (close - prev_close) / prev_close * 100 if prev_close else 0
-            result.append({
-                "name": name,
-                "ticker": ticker,
-                "close": close,
-                "pct": round(pct, 2),
-            })
-        except Exception as exc:
-            logger.warning("抓取 %s 失敗: %s", ticker, exc)
-    return result
-
-
 def _get_watchlist() -> list[dict]:
-    """從 Supabase 取得最近一期 weekly_scores 的 Top 10 通過股票。"""
+    """從 weekly_scores 取得最新一期 Top 10，附帶評分欄位。"""
     rows = db.select("weekly_scores", columns="*")
     if not rows:
         return []
     df = pd.DataFrame(rows)
     latest_week = df["week_date"].max()
-    top = (df[(df["week_date"] == latest_week) & (df["passes_filter"].astype(str) == "true")]
+    top = (df[(df["week_date"] == latest_week) & (df["passes_filter"] == True)]
            .sort_values("total_score", ascending=False)
            .head(10))
+    if top.empty:
+        return []
     universe = {r["stock_id"]: r.get("stock_name", r["stock_id"])
                 for r in db.select("stock_universe")}
     return [
-        {"stock_id": r["stock_id"],
-         "stock_name": universe.get(r["stock_id"], r["stock_id"])}
+        {
+            "stock_id":    r["stock_id"],
+            "stock_name":  universe.get(r["stock_id"], r["stock_id"]),
+            "total_score": float(r.get("total_score", 0) or 0),
+        }
         for _, r in top.iterrows()
     ]
 
@@ -78,45 +41,50 @@ def run() -> None:
     today = date.today().strftime("%Y-%m-%d")
     logger.info("═══ 晨報工作開始 %s ═══", today)
 
-    us_data = _fetch_us_market()
-    logger.info("取得 %d 個美股指數", len(us_data))
-
     watchlist = _get_watchlist()
     if not watchlist:
-        logger.warning("watchlist 為空，晨報僅含美股概況")
+        logger.warning("watchlist 為空，跳過晨報")
+        return
 
-    prev_data = []
-    if watchlist:
-        universe = {s["stock_id"] for s in watchlist}
-        price_df = fetchers.fetch_price(universe, days=5)
-        inst_df = fetchers.fetch_institutional(universe, days=5)
+    stock_ids = {s["stock_id"] for s in watchlist}
 
-        for stock in watchlist:
-            sid = stock["stock_id"]
-            px = price_df[price_df["stock_id"] == sid].sort_values("date")
-            if px.empty:
-                continue
-            latest_px = px.iloc[-1]
-            prev_px = px.iloc[-2] if len(px) >= 2 else latest_px
-            close = float(latest_px.get("close", 0) or 0)
-            prev_close = float(prev_px.get("close", 0) or 0)
-            pct = ((close - prev_close) / prev_close * 100) if prev_close else 0
+    # 直接讀 Supabase（昨日日報已存，無需打 API）
+    price_map  = {r["stock_id"]: r for r in db.select("daily_price")
+                  if r["stock_id"] in stock_ids}
+    inst_map   = {r["stock_id"]: r for r in db.select("daily_institutional")
+                  if r["stock_id"] in stock_ids}
+    margin_map = {r["stock_id"]: r for r in db.select("daily_margin")
+                  if r["stock_id"] in stock_ids}
 
-            inst = inst_df[inst_df["stock_id"] == sid].sort_values("date")
-            latest_inst = inst.iloc[-1] if not inst.empty else {}
-            foreign_net = int(latest_inst.get("foreign_net", 0) or 0) if not inst.empty else 0
-            trust_net = int(latest_inst.get("trust_net", 0) or 0) if not inst.empty else 0
+    morning_data = []
+    for s in watchlist:
+        sid  = s["stock_id"]
+        px   = price_map.get(sid, {})
+        inst = inst_map.get(sid, {})
+        mg   = margin_map.get(sid, {})
 
-            prev_data.append({
-                "stock_id": sid,
-                "stock_name": stock["stock_name"],
-                "close": close,
-                "pct": round(pct, 2),
-                "foreign_net": foreign_net,
-                "trust_net": trust_net,
-            })
+        close  = float(px.get("close",  0) or 0)
+        ma5    = float(px.get("ma5",    0) or 0)
+        ma20   = float(px.get("ma20",   0) or 0)
+        ma60   = float(px.get("ma60",   0) or 0)
 
-    notifier.send_morning_briefing(us_data, prev_data, today)
+        morning_data.append({
+            "stock_id":       sid,
+            "stock_name":     s["stock_name"],
+            "total_score":    s["total_score"],
+            "close":          close,
+            "high":           float(px.get("high",   0) or 0),
+            "low":            float(px.get("low",    0) or 0),
+            "volume":         int(px.get("volume", 0) or 0),
+            "ma_aligned":     close > ma5 > ma20 > ma60 > 0,
+            "foreign_streak": int(inst.get("foreign_streak", 0) or 0),
+            "trust_streak":   int(inst.get("trust_streak",   0) or 0),
+            "foreign_net":    int(inst.get("foreign_net",    0) or 0),
+            "trust_net":      int(inst.get("trust_net",      0) or 0),
+            "margin_chg_pct": float(mg.get("margin_chg_pct", 0) or 0),
+        })
+
+    notifier.send_morning_briefing(morning_data, today)
     logger.info("═══ 晨報工作完成 ═══")
 
 

@@ -133,82 +133,115 @@ def send_daily_report(watchlist: list[dict], date_str: str) -> None:
 
 
 # ─────────────────────────────────────────────
-# 晨報（開盤前局勢分析）
+# 晨報（開盤前：直接讀 Supabase，不打外部 API）
 # ─────────────────────────────────────────────
 
-def send_morning_briefing(us_data: list[dict], watchlist: list[dict], date_str: str) -> None:
+def send_morning_briefing(watchlist: list[dict], date_str: str) -> None:
     """
-    us_data:  [{"name", "ticker", "close", "pct"}, ...]
-    watchlist: [{"stock_id", "stock_name", "close", "pct", "foreign_net", "trust_net"}, ...]
+    watchlist: 每支包含
+      stock_id, stock_name, total_score, close, high, low, volume,
+      ma_aligned, foreign_streak, trust_streak, foreign_net, trust_net,
+      margin_chg_pct
     """
-    lines = [f"🌅 *今日開盤前局勢分析 {date_str}*", ""]
+    lines = [f"🌅 *開盤前晨報 {date_str}*", ""]
 
-    # 美股隔夜表現
-    if us_data:
-        lines.append("🌏 *美股隔夜收盤*")
-        for idx in us_data:
-            pct = idx["pct"]
-            arrow = "▲" if pct >= 0 else "▼"
-            sign = "+" if pct >= 0 else ""
-            lines.append(
-                f"  {arrow} *{idx['name']}*: {idx['close']:,.2f} ({sign}{pct:.2f}%)"
-            )
+    # 重點關注：多頭排列 + 法人買超，取前 3
+    highlights = [
+        s for s in watchlist
+        if s.get("ma_aligned") and (s.get("foreign_streak", 0) > 0 or s.get("trust_streak", 0) > 0)
+    ][:3]
 
-        # 整體氛圍研判
-        sp = next((x for x in us_data if x["ticker"] == "^GSPC"), None)
-        vix = next((x for x in us_data if x["ticker"] == "^VIX"), None)
-        ewt = next((x for x in us_data if x["ticker"] == "EWT"), None)
-
-        mood = []
-        if sp:
-            if sp["pct"] >= 1.0:
-                mood.append("美股強勁上漲，市場風險偏好高")
-            elif sp["pct"] >= 0:
-                mood.append("美股小幅收紅，偏多格局")
-            elif sp["pct"] >= -1.0:
-                mood.append("美股小幅收黑，需留意")
-            else:
-                mood.append("美股重挫，市場風險偏好低")
-        if vix:
-            if vix["close"] >= 30:
-                mood.append(f"VIX={vix['close']:.1f} 恐慌偏高，操作謹慎")
-            elif vix["close"] >= 20:
-                mood.append(f"VIX={vix['close']:.1f} 適中")
-            else:
-                mood.append(f"VIX={vix['close']:.1f} 偏低，情緒穩定")
-        if ewt:
-            arrow = "▲" if ewt["pct"] >= 0 else "▼"
-            mood.append(f"台灣 EWT {arrow}{ewt['pct']:+.2f}%")
-
-        if mood:
-            lines.append("")
-            lines.append("🧭 *開盤情緒研判*")
-            for m in mood:
-                lines.append(f"  • {m}")
-        lines.append("")
-
-    # Watchlist 昨日回顧
-    if watchlist:
-        lines.append("📋 *Watchlist 昨收回顧*")
-        for s in sorted(watchlist, key=lambda x: x.get("pct", 0), reverse=True):
-            pct = s.get("pct", 0)
-            arrow = "▲" if pct >= 0 else "▼"
+    if highlights:
+        lines.append("🔥 *今日重點關注*")
+        for s in highlights:
+            f_str = _streak_label(s.get("foreign_streak", 0))
+            t_str = _streak_label(s.get("trust_streak", 0))
             f_net = s.get("foreign_net", 0)
-            t_net = s.get("trust_net", 0)
-            chip_tag = ""
-            if f_net > 0 and t_net > 0:
-                chip_tag = " 🔥外資投信同買"
-            elif f_net > 0:
-                chip_tag = " 💹外資買超"
-            elif t_net > 0:
-                chip_tag = " 💹投信買超"
-            lines.append(
-                f"  {arrow} *{s['stock_id']}* {s['stock_name']} "
-                f"{s['close']:.1f} ({pct:+.1f}%){chip_tag}"
-            )
-        lines.append("")
+            lines += [
+                f"  *{s['stock_name']} ({s['stock_id']})* 📊{s['total_score']:.0f}分",
+                f"  昨收 {s['close']:.1f} ✅多頭 | 外資{f_str}({f_net:+,}張) | 投信{t_str}",
+                "",
+            ]
 
-    lines.append("📌 _台股 09:00 開盤，注意量能與法人動向_")
+    # Watchlist 全覽
+    lines.append("📋 *Watchlist 全覽*")
+    for s in watchlist:
+        ma_tag = "✅" if s.get("ma_aligned") else "📉"
+        f_streak = s.get("foreign_streak", 0)
+        t_streak = s.get("trust_streak", 0)
+        mg = s.get("margin_chg_pct", 0) * 100
+        mg_tag = f" ⚠️融資+{mg:.1f}%" if mg > 10 else ""
+
+        chip_parts = []
+        if f_streak != 0:
+            chip_parts.append(f"外資{_streak_label(f_streak)}")
+        if t_streak != 0:
+            chip_parts.append(f"投信{_streak_label(t_streak)}")
+        chip_str = " | ".join(chip_parts) if chip_parts else "法人持平"
+
+        lines.append(
+            f"  {ma_tag} *{s['stock_id']}* {s['stock_name']} "
+            f"{s['close']:.1f} | {chip_str}{mg_tag}"
+        )
+
+    # 融資警示
+    margin_warn = [s for s in watchlist if s.get("margin_chg_pct", 0) * 100 > 10]
+    if margin_warn:
+        lines += ["", "⚠️ *融資大增（注意風險）*"]
+        for s in margin_warn:
+            mg = s.get("margin_chg_pct", 0) * 100
+            lines.append(f"  • {s['stock_name']} ({s['stock_id']}): 融資較20日前 +{mg:.1f}%")
+
+    lines += ["", "📌 _台股 09:00 開盤_"]
 
     _send("\n".join(lines))
-    logger.info("晨報已發送")
+    logger.info("晨報已發送，%d 支", len(watchlist))
+
+
+# ─────────────────────────────────────────────
+# 盤中快報（有訊號才發）
+# ─────────────────────────────────────────────
+
+def send_intraday_alert(alerts: list[dict], time_str: str) -> None:
+    """
+    alerts: 每支包含
+      stock_id, stock_name, price, pct, prev_close, volume, signals (list[str])
+    """
+    lines = [f"📡 *盤中快報 {time_str}*", ""]
+
+    surge  = [a for a in alerts if a["pct"] >= 2.0]
+    plunge = [a for a in alerts if a["pct"] <= -2.0]
+    others = [a for a in alerts if -2.0 < a["pct"] < 2.0]
+
+    if surge:
+        lines.append("🚀 *強勢上漲*")
+        for a in sorted(surge, key=lambda x: x["pct"], reverse=True):
+            sig = " | ".join(a["signals"])
+            lines.append(
+                f"  *{a['stock_name']} ({a['stock_id']})*: "
+                f"{a['price']:.1f} ▲{a['pct']:.1f}% | {sig} | 量{a['volume']:,}張"
+            )
+        lines.append("")
+
+    if plunge:
+        lines.append("🔻 *急殺警示*")
+        for a in sorted(plunge, key=lambda x: x["pct"]):
+            sig = " | ".join(a["signals"])
+            lines.append(
+                f"  *{a['stock_name']} ({a['stock_id']})*: "
+                f"{a['price']:.1f} ▼{abs(a['pct']):.1f}% | {sig} | 量{a['volume']:,}張"
+            )
+        lines.append("")
+
+    if others:
+        lines.append("📌 *其他訊號*")
+        for a in others:
+            sig = " | ".join(a["signals"])
+            arrow = "▲" if a["pct"] >= 0 else "▼"
+            lines.append(
+                f"  *{a['stock_name']} ({a['stock_id']})*: "
+                f"{a['price']:.1f} {arrow}{abs(a['pct']):.1f}% | {sig}"
+            )
+
+    _send("\n".join(lines))
+    logger.info("盤中快報已發送，%d 支異動", len(alerts))
