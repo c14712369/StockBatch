@@ -2,8 +2,8 @@
 
 on:
   schedule:
-    # 平日 00:30 UTC = 08:30 TST（台股開盤前晨報）
-    - cron: "30 0 * * 1-5"
+    # 前夜 23:30 UTC = 隔日 07:30 TST（提早排程，預留延遲緩衝，確保開盤前到）
+    - cron: "30 23 * * 0-4"
     # 平日 10:30 UTC = 18:30 TST（台股收盤後日報）
     - cron: "30 10 * * 1-5"
   workflow_dispatch:
@@ -26,8 +26,8 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run morning briefing (08:30 TST)
-        if: github.event_name == 'schedule' && contains(github.event.schedule, '30 0')
+      - name: Run morning briefing (07:30 TST)
+        if: github.event_name == 'schedule' && contains(github.event.schedule, '30 23')
         env:
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
