@@ -280,7 +280,7 @@ def fetch_margin(universe: set[str], days: int = 45) -> pd.DataFrame:
 # 4. 月營收（FinMind 免費嘗試）
 # ────────────────────────────────────────────────
 
-def fetch_revenue(universe: set[str], months: int = 14) -> pd.DataFrame:
+def fetch_revenue(universe: set[str], months: int = 15) -> pd.DataFrame:
     """嘗試用 FinMind 抓月營收；若需付費則回傳空 DataFrame。"""
     all_rows = []
     start = _date(months * 31)

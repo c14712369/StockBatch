@@ -107,7 +107,7 @@ def run_backtest(weeks: int = 12):
     price_df = fetch_price_cached(universe_ids, days=days_to_fetch)
     inst_df = fetch_institutional_cached(universe_ids, days=days_to_fetch)
     margin_df = fetch_margin_cached(universe_ids, days=days_to_fetch)
-    rev_df = fetch_revenue_cached(universe_ids, months=(weeks // 4) + 14)
+    rev_df = fetch_revenue_cached(universe_ids, months=(weeks // 4) + 15)
     income_df, balance_df, cashflow_df = fetch_financials_cached(universe_ids)
     sh_df = fetch_shareholding_cached(universe_ids, days=days_to_fetch)
     

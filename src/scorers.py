@@ -273,6 +273,8 @@ def _calc_pe(stock_id: str, price: pd.DataFrame, income: pd.DataFrame) -> float:
     if px.empty or inc.empty:
         return 0.0
     close = px.iloc[-1].get("close", 0) or 0
+    if len(inc) < 4:
+        return 0.0  # 不足 4 季資料，TTM 不可信，跳過
     eps_ttm = inc.tail(4)["eps"].sum()
     if eps_ttm <= 0 or close <= 0:
         return 0.0
