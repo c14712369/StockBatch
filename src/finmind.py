@@ -54,37 +54,38 @@ def fetch(dataset: str, start_date: str, end_date: str = "",
 
         try:
             resp = requests.get(BASE_URL, params=params, timeout=30)
-            resp.raise_for_status()
+            # 不直接 raise_for_status，先拿 body 判斷內容
             body = resp.json()
-            if body.get("status") != 200:
-                msg = body.get("msg", "unknown error")
-                # 判斷是否為「非會員/免費次數用盡」
-                if "register" in msg.lower():
-                    logger.warning("FinMind %s 需付費訂閱或達上限: %s", dataset, msg)
-                    tokens_tried.add(current_token)
-                    if len(FINMIND_TOKENS) > 1 and len(tokens_tried) < num_tokens:
-                        switch_to_next_token()
-                        continue  # 立即切換至下一把 Token 重試
-                    return []  # 所有 Token 均已達上限
-                logger.warning("FinMind %s 回傳非 200: %s", dataset, msg)
-                return []
+            status_code = resp.status_code
+            api_status = body.get("status", 200)
+            msg = str(body.get("msg", "")).lower()
+
+            # 判斷是否為「等級限制 / 權限不足」
+            # 可能是 HTTP 400 或 JSON 裡的 status 非 200
+            is_limit_error = (status_code == 400) or (api_status != 200 and "register" in msg)
+            
+            if is_limit_error:
+                logger.warning("FinMind %s 權限限制 (Token %d): %s", 
+                               dataset, (_current_token_idx % len(FINMIND_TOKENS)) + 1, msg)
+                tokens_tried.add(current_token)
+                if len(FINMIND_TOKENS) > 1 and len(tokens_tried) < num_tokens:
+                    switch_to_next_token()
+                    continue  # 立即換下一把 Token 試，不重試這一把
+                return [] # 所有 Token 都試過了或只有一把
+
+            resp.raise_for_status()
             return body.get("data", [])
+
         except requests.RequestException as exc:
-            # 402 = 付費功能，直接放棄（換 Token 也無用）
+            # 處理 402 或其他非 400 的異常
             status_code = exc.response.status_code if exc.response is not None else 0
             if status_code == 402:
                 logger.warning("FinMind %s 需付費訂閱(HTTP 402)，跳過", dataset)
                 return []
 
-            body_text = ""
-            try:
-                body_text = exc.response.text[:200] if exc.response is not None else ""
-            except Exception:
-                pass
-
-            logger.warning("FinMind 第 %d 次請求失敗 (%s): %s | body: %s",
-                           attempt + 1, dataset, exc, body_text)
-
+            logger.warning("FinMind 第 %d 次請求異常 (%s): %s", attempt + 1, dataset, exc)
+            
+            # 一般連線異常才重試
             retry_in_token = attempt % max_retries_per_token
             if retry_in_token < max_retries_per_token - 1:
                 time.sleep(2 ** retry_in_token)
@@ -92,4 +93,5 @@ def fetch(dataset: str, start_date: str, end_date: str = "",
                 tokens_tried.add(current_token)
                 switch_to_next_token()
 
+    return []
     return []
