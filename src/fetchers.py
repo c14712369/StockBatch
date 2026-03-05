@@ -288,8 +288,7 @@ def fetch_revenue(universe: set[str], months: int = 15) -> pd.DataFrame:
         rows = finmind.fetch("TaiwanStockMonthRevenue",
                              start_date=start, stock_id=sid)
         all_rows.extend(rows)
-        if rows:
-            time.sleep(0.2)
+        time.sleep(0.2)
 
     if not all_rows:
         logger.warning("月營收：FinMind 免費版無資料，此維度評分將跳過")
@@ -337,7 +336,7 @@ def fetch_financials(universe: set[str]) -> tuple[pd.DataFrame, pd.DataFrame, pd
             max_date = fm_df["date"].max()
             fm_max_year = max_date.year
             fm_max_q = (max_date.month - 1) // 3 + 1
-            
+
             # Get latest year and quarter from DB for this stock
             stock_db = db_inc[db_inc["stock_id"] == first_sid]
             if not stock_db.empty:
@@ -345,7 +344,12 @@ def fetch_financials(universe: set[str]) -> tuple[pd.DataFrame, pd.DataFrame, pd
                 db_max_q = stock_db[stock_db["year"] == db_max_year]["quarter"].max()
                 if db_max_year >= fm_max_year and db_max_q >= fm_max_q:
                     needs_update = False
-                    
+        else:
+            # FinMind 暫時無回應（網路問題或 Rate Limit），保守沿用 DB 快取
+            # 避免因短暫 API 失敗而觸發 50 支股票全量重新抓取
+            logger.warning("財務報表：FinMind 探針請求無回應，沿用既有快取（%d 筆）", len(db_inc))
+            needs_update = False
+
         if not needs_update:
             logger.info("財務報表：資料庫已是最新，直接讀取快取，跳過 API 抓取")
             db_bal = pd.DataFrame(db.select("quarterly_balance"))

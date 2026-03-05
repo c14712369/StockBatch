@@ -110,15 +110,16 @@ def run() -> None:
     paper_rows = []
     for s in top_10:
         sid = s["stock_id"]
-        # 從抓下來的價格資料找出最新一筆收盤價，當作本週起算的進場價
+        # entry_price 設為 0（哨兵值），等週一日報第一次更新時以當日收盤確認，
+        # 避免用週五收盤當進場價而忽略週一開盤跳空的誤差。
         px = price_df[price_df["stock_id"] == sid].sort_values("date")
-        entry_price = float(px.iloc[-1].get("close", 0)) if not px.empty else 0.0
-        
+        ref_price = float(px.iloc[-1].get("close", 0)) if not px.empty else 0.0
+
         paper_rows.append({
             "week_date": today,
             "stock_id": sid,
-            "entry_price": entry_price,
-            "current_price": entry_price,
+            "entry_price": 0.0,       # 待首個交易日收盤確認
+            "current_price": ref_price,
             "unrealized_pnl_pct": 0.0,
             "status": "open"
         })

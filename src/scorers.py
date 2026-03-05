@@ -10,6 +10,15 @@ from src.config import WEIGHTS
 logger = logging.getLogger(__name__)
 
 
+def _lerp(value: float, low: float, high: float,
+          score_low: float, score_high: float) -> float:
+    """在 [low, high] 區間內對 value 做線性插值，回傳 [score_low, score_high] 之間的分數。"""
+    if high == low:
+        return score_high
+    t = max(0.0, min(1.0, (value - low) / (high - low)))
+    return score_low + t * (score_high - score_low)
+
+
 def _filter(df: pd.DataFrame, stock_id: str) -> pd.DataFrame:
     """安全過濾：空 DataFrame 或缺少 stock_id 欄時直接回傳空。"""
     if df.empty or "stock_id" not in df.columns:
@@ -66,7 +75,7 @@ def score_profitability(stock_id: str, income: pd.DataFrame,
                         revenue: pd.DataFrame) -> float:
     score = 0.0
 
-    # 近 3 月平均 YOY（40分）
+    # 近 3 月平均 YOY（40分）—— 線性插值讓評分連續
     rev = _safe_sort(_filter(revenue, stock_id))
     if not rev.empty:
         avg_yoy = rev.tail(3)["revenue_yoy"].mean()
@@ -75,22 +84,22 @@ def score_profitability(stock_id: str, income: pd.DataFrame,
         elif avg_yoy >= 30:
             score += 40
         elif avg_yoy >= 15:
-            score += 30
+            score += _lerp(avg_yoy, 15, 30, 30, 40)
         elif avg_yoy >= 5:
-            score += 20
+            score += _lerp(avg_yoy, 5, 15, 20, 30)
         elif avg_yoy > 0:
-            score += 10
+            score += _lerp(avg_yoy, 0, 5, 10, 20)
 
-    # EPS QoQ 成長（30分）
+    # EPS QoQ 成長（30分）—— 線性插值
     inc = _safe_sort(_filter(income, stock_id))
     if not inc.empty:
         qoq = inc.iloc[-1].get("eps_qoq", 0) or 0
         if qoq >= 20:
             score += 30
         elif qoq >= 10:
-            score += 20
+            score += _lerp(qoq, 10, 20, 20, 30)
         elif qoq > 0:
-            score += 10
+            score += _lerp(qoq, 0, 10, 10, 20)
 
     # 毛利率趨勢：近兩季是否上升（30分）
     if len(inc) >= 2:
@@ -109,50 +118,44 @@ def score_profitability(stock_id: str, income: pd.DataFrame,
 # ─────────────────────────────────────────────
 
 def score_health(stock_id: str, balance: pd.DataFrame,
-                 cashflow: pd.DataFrame, pe_ratio: float) -> float:
+                 cashflow: pd.DataFrame) -> float:
+    """財務體質評分 0~100（流動比 30 + 負債比 30 + OCF品質 40）。
+    PE 調整已移至 compute_all_scores 作後置處理，避免滿分截斷。
+    """
     score = 0.0
 
     bs = _safe_sort(_filter(balance, stock_id))
     if not bs.empty:
         latest = bs.iloc[-1]
 
-        # 流動比率（30分）
+        # 流動比率（30分）—— 線性插值
         cur = latest.get("current_ratio", 0) or 0
         if cur >= 2.0:
             score += 30
         elif cur >= 1.5:
-            score += 20
+            score += _lerp(cur, 1.5, 2.0, 20, 30)
         elif cur >= 1.0:
-            score += 10
+            score += _lerp(cur, 1.0, 1.5, 10, 20)
 
-        # 負債比（30分）
+        # 負債比（30分）—— 線性插值（負債比越低越好）
         debt = latest.get("debt_ratio", 0) or 0
         if debt < 30:
             score += 30
         elif debt < 45:
-            score += 20
+            score += _lerp(debt, 30, 45, 30, 20)
         elif debt < 60:
-            score += 10
+            score += _lerp(debt, 45, 60, 20, 10)
 
-    # OCF 品質 = OCF / 淨利（40分）
+    # OCF 品質 = OCF / 淨利（40分）—— 線性插值
     cf = _safe_sort(_filter(cashflow, stock_id))
     if not cf.empty:
         quality = cf.iloc[-1].get("ocf_quality", 0) or 0
         if quality >= 1.2:
             score += 40
         elif quality >= 0.8:
-            score += 30
+            score += _lerp(quality, 0.8, 1.2, 30, 40)
         elif quality >= 0.5:
-            score += 15
-
-    # P/E 評估（20分）
-    if pe_ratio > 0:
-        if pe_ratio < 15:
-            score += 20
-        elif pe_ratio < 20:
-            score += 15
-        elif pe_ratio < 25:
-            score += 10
+            score += _lerp(quality, 0.5, 0.8, 15, 30)
 
     return min(score, 100)
 
@@ -247,17 +250,17 @@ def score_momentum(stock_id: str, price: pd.DataFrame) -> float:
     elif close > ma60:
         score += 10
 
-    # 收盤 vs 20MA（30分）
+    # 收盤 vs 20MA（30分）—— 線性插值
     if ma20 > 0:
         pct_vs_ma20 = (close - ma20) / ma20 * 100
         if pct_vs_ma20 >= 5:
             score += 30
         elif pct_vs_ma20 >= 2:
-            score += 20
+            score += _lerp(pct_vs_ma20, 2, 5, 20, 30)
         elif pct_vs_ma20 > 0:
-            score += 10
+            score += _lerp(pct_vs_ma20, 0, 2, 10, 20)
 
-    # 量能趨勢：近 5 日均量 vs 近 20 日均量（30分）
+    # 量能趨勢：近 5 日均量 vs 近 20 日均量（30分）—— 線性插值
     if len(px) >= 20:
         vol_5 = px.tail(5)["volume"].mean()
         vol_20 = px.tail(20)["volume"].mean()
@@ -266,9 +269,9 @@ def score_momentum(stock_id: str, price: pd.DataFrame) -> float:
             if vol_ratio >= 1.5:
                 score += 30
             elif vol_ratio >= 1.2:
-                score += 20
+                score += _lerp(vol_ratio, 1.2, 1.5, 20, 30)
             elif vol_ratio >= 1.0:
-                score += 10
+                score += _lerp(vol_ratio, 1.0, 1.2, 10, 20)
 
     return min(score, 100)
 
@@ -308,7 +311,7 @@ def compute_all_scores(universe: list[dict],
             if last_4_eps > 0 and close_price > 0:
                 pe_ratio = round(close_price / last_4_eps, 1)
 
-        h = score_health(sid, balance, cashflow, pe_ratio)
+        h = score_health(sid, balance, cashflow)
         c = score_chip(sid, institutional, margin, shareholding)
         m = score_momentum(sid, price)
 
@@ -318,6 +321,19 @@ def compute_all_scores(universe: list[dict],
             c * WEIGHTS["chip"] +
             m * WEIGHTS["momentum"]
         )
+
+        # PE 後置調整（±0~10分）：低估加分、過高扣分
+        pe_adj = 0.0
+        if pe_ratio > 0:
+            if pe_ratio < 15:
+                pe_adj = 10.0
+            elif pe_ratio < 20:
+                pe_adj = 5.0
+            elif pe_ratio >= 35:
+                pe_adj = -10.0
+            elif pe_ratio >= 25:
+                pe_adj = -5.0
+        total = max(0.0, min(100.0, total + pe_adj))
 
         results.append({
             "stock_id": sid,
@@ -331,8 +347,8 @@ def compute_all_scores(universe: list[dict],
             "pe": pe_ratio,
             "total": round(total, 1),
         })
-        logger.debug("%s %s: P=%.0f H=%.0f C=%.0f M=%.0f PE=%.1f → %.1f %s",
-                     sid, name, p, h, c, m, pe_ratio, total,
+        logger.debug("%s %s: P=%.0f H=%.0f C=%.0f M=%.0f PE=%.1f(adj%+.0f) → %.1f %s",
+                     sid, name, p, h, c, m, pe_ratio, pe_adj, total,
                      "" if passed else f"[篩除: {reason}]")
 
     results.sort(key=lambda x: (x["passes_filter"], x["total"]), reverse=True)

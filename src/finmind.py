@@ -42,11 +42,12 @@ def fetch(dataset: str, start_date: str, end_date: str = "",
     if stock_id:
         params["data_id"] = stock_id
 
+    num_tokens = max(1, len(FINMIND_TOKENS))
     max_retries_per_token = 3
-    # 總共嘗試次數 = (每把 Key 3次) * (Key 的總數)，避免無限迴圈
-    total_attempts = max_retries_per_token * max(1, len(FINMIND_TOKENS))
+    # 每把 Token 最多重試 max_retries_per_token 次，試完所有 Token 後放棄
+    tokens_tried = set()
 
-    for attempt in range(total_attempts):
+    for attempt in range(max_retries_per_token * num_tokens):
         current_token = get_current_token()
         if current_token:
             params["token"] = current_token
@@ -60,32 +61,35 @@ def fetch(dataset: str, start_date: str, end_date: str = "",
                 # 判斷是否為「非會員/免費次數用盡」
                 if "register" in msg.lower():
                     logger.warning("FinMind %s 需付費訂閱或達上限: %s", dataset, msg)
-                    if len(FINMIND_TOKENS) > 1:
+                    tokens_tried.add(current_token)
+                    if len(FINMIND_TOKENS) > 1 and len(tokens_tried) < num_tokens:
                         switch_to_next_token()
-                        continue # 直接重試新的 Token
-                    else:
-                        return [] # 如果只有一把，直接放棄
-                
+                        continue  # 立即切換至下一把 Token 重試
+                    return []  # 所有 Token 均已達上限
                 logger.warning("FinMind %s 回傳非 200: %s", dataset, msg)
                 return []
             return body.get("data", [])
         except requests.RequestException as exc:
-            # 402 = 付費功能，或是被鎖定，直接跳過或換 Token 看看
+            # 402 = 付費功能，直接放棄（換 Token 也無用）
             status_code = exc.response.status_code if exc.response is not None else 0
             if status_code == 402:
                 logger.warning("FinMind %s 需付費訂閱(HTTP 402)，跳過", dataset)
                 return []
-            
-            body = ""
+
+            body_text = ""
             try:
-                body = exc.response.text[:200] if exc.response is not None else ""
+                body_text = exc.response.text[:200] if exc.response is not None else ""
             except Exception:
                 pass
-            
+
             logger.warning("FinMind 第 %d 次請求失敗 (%s): %s | body: %s",
-                           attempt + 1, dataset, exc, body)
-            
-            if attempt < total_attempts - 1:
-                time.sleep(2 ** (attempt % max_retries_per_token))
-            
+                           attempt + 1, dataset, exc, body_text)
+
+            retry_in_token = attempt % max_retries_per_token
+            if retry_in_token < max_retries_per_token - 1:
+                time.sleep(2 ** retry_in_token)
+            elif len(FINMIND_TOKENS) > 1 and len(tokens_tried) < num_tokens:
+                tokens_tried.add(current_token)
+                switch_to_next_token()
+
     return []

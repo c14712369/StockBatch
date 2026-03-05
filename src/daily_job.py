@@ -16,8 +16,11 @@ logger = logging.getLogger(__name__)
 
 
 def _get_watchlist() -> list[dict]:
-    """從 Supabase 取得最近一期 weekly_scores 的 Top 10 通過股票。"""
-    rows = db.select("weekly_scores", columns="*")
+    """從 Supabase 取得最近一期 weekly_scores 的 Top 10 通過股票。
+    只拉最新 100 筆（週報 50 支 × 2 週），避免全表掃描。
+    """
+    rows = db.select("weekly_scores", columns="*",
+                     order_by="week_date", desc=True, limit=100)
     if not rows:
         return []
 
@@ -129,13 +132,19 @@ def run() -> None:
         for pos in open_positions:
             sid = pos["stock_id"]
             week_date = pos["week_date"]
-            
+
             px_data = all_prices[all_prices["stock_id"] == sid].sort_values("date")
             if not px_data.empty:
                 current_price = float(px_data.iloc[-1].get("close", 0) or 0)
-                entry_price = float(pos["entry_price"])
+                entry_price = float(pos["entry_price"] or 0)
+
+                # entry_price == 0 表示週報建倉時的哨兵值，以首個交易日收盤確認進場價
+                if entry_price == 0.0 and current_price > 0:
+                    entry_price = current_price
+                    logger.info("Paper Trading %s 首日建倉，進場價確認為 %.2f", sid, entry_price)
+
                 pnl_pct = ((current_price - entry_price) / entry_price * 100) if entry_price > 0 else 0.0
-                
+
                 # 準備寫回 DB
                 paper_updates.append({
                     "week_date": week_date,

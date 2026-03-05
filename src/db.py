@@ -41,12 +41,17 @@ def upsert(table: str, rows: list[dict], on_conflict: str = "") -> None:
 
 
 def select(table: str, filters: dict | None = None,
-           columns: str = "*", limit: int = 0) -> list[dict]:
-    """查詢資料表，filters 為 {column: value} 的 eq 條件。"""
+           columns: str = "*", limit: int = 0,
+           order_by: str = "", desc: bool = False) -> list[dict]:
+    """查詢資料表，filters 為 {column: value} 的 eq 條件。
+    order_by 指定排序欄位；desc=True 則降冪排列。
+    """
     try:
         q = get_client().table(table).select(columns)
         for col, val in (filters or {}).items():
             q = q.eq(col, val)
+        if order_by:
+            q = q.order(order_by, desc=desc)
         if limit:
             q = q.limit(limit)
         return q.execute().data or []
