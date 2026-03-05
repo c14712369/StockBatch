@@ -153,10 +153,12 @@ def score_health(stock_id: str, balance: pd.DataFrame,
 def score_chip(stock_id: str, institutional: pd.DataFrame,
                margin: pd.DataFrame, shareholding: pd.DataFrame) -> float:
     score = 0.0
+    max_score = 0.0
 
     # 外資 + 投信連續買超天數（40分）
     inst = _filter(institutional, stock_id)
     if not inst.empty:
+        max_score += 40.0
         latest = inst.sort_values("date").iloc[-1]
         foreign_streak = latest.get("foreign_streak", 0) or 0
         trust_streak = latest.get("trust_streak", 0) or 0
@@ -180,6 +182,7 @@ def score_chip(stock_id: str, institutional: pd.DataFrame,
     # 大戶持股比（30分）—— 比例越高越好
     sh = _filter(shareholding, stock_id)
     if not sh.empty:
+        max_score += 30.0
         big_pct = sh.sort_values("date").iloc[-1].get("big_holder_pct", 0) or 0
         if big_pct >= 70:
             score += 30
@@ -191,6 +194,7 @@ def score_chip(stock_id: str, institutional: pd.DataFrame,
     # 融資水位（30分）—— 增幅越小越好（融資高位=危險）
     mg = _filter(margin, stock_id)
     if not mg.empty:
+        max_score += 30.0
         chg = mg.sort_values("date").iloc[-1].get("margin_chg_pct", 0) or 0
         if chg <= -0.05:          # 融資減少 > 5%
             score += 30
@@ -200,9 +204,9 @@ def score_chip(stock_id: str, institutional: pd.DataFrame,
             score += 10
         # 融資大幅增加 → 0分
         
-    if sh.empty:
-        # 若無大戶持股比資料（滿分變 70），按比例放大到 100
-        score = score * (100.0 / 70.0)
+    # 動態依據取得的資料維度，將總分等比例放大至滿分 100 分
+    if max_score > 0:
+        score = score * (100.0 / max_score)
 
     return min(score, 100)
 
