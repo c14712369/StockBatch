@@ -323,6 +323,40 @@ def fetch_revenue(universe: set[str], months: int = 15) -> pd.DataFrame:
 
 def fetch_financials(universe: set[str]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """FinMind 損益/資負/現金流，逐股抓，並寫入 Supabase。"""
+    # Check DB first
+    db_inc = pd.DataFrame(db.select("quarterly_income"))
+    if not db_inc.empty:
+        # Check FinMind for ONE stock to see the latest available date
+        first_sid = sorted(list(universe))[0]
+        fm_test = finmind.fetch("TaiwanStockFinancialStatements", start_date=_date(180), stock_id=first_sid)
+        needs_update = True
+        if fm_test:
+            # Get latest year and quarter from FinMind
+            fm_df = pd.DataFrame(fm_test)
+            fm_df["date"] = pd.to_datetime(fm_df["date"])
+            max_date = fm_df["date"].max()
+            fm_max_year = max_date.year
+            fm_max_q = (max_date.month - 1) // 3 + 1
+            
+            # Get latest year and quarter from DB for this stock
+            stock_db = db_inc[db_inc["stock_id"] == first_sid]
+            if not stock_db.empty:
+                db_max_year = stock_db["year"].max()
+                db_max_q = stock_db[stock_db["year"] == db_max_year]["quarter"].max()
+                if db_max_year >= fm_max_year and db_max_q >= fm_max_q:
+                    needs_update = False
+                    
+        if not needs_update:
+            logger.info("財務報表：資料庫已是最新，直接讀取快取，跳過 API 抓取")
+            db_bal = pd.DataFrame(db.select("quarterly_balance"))
+            db_cf = pd.DataFrame(db.select("quarterly_cashflow"))
+            
+            db_inc["date"] = pd.to_datetime(db_inc["year"].astype(str) + "-" + (db_inc["quarter"] * 3).astype(str).str.zfill(2) + "-01")
+            db_bal["date"] = pd.to_datetime(db_bal["year"].astype(str) + "-" + (db_bal["quarter"] * 3).astype(str).str.zfill(2) + "-01")
+            db_cf["date"] = pd.to_datetime(db_cf["year"].astype(str) + "-" + (db_cf["quarter"] * 3).astype(str).str.zfill(2) + "-01")
+            
+            return db_inc, db_bal, db_cf
+
     start = _date(365 * 2)
     logger.info("FinMind 財務報表：%d 支股票（start=%s）…", len(universe), start)
 

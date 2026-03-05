@@ -109,7 +109,7 @@ def score_profitability(stock_id: str, income: pd.DataFrame,
 # ─────────────────────────────────────────────
 
 def score_health(stock_id: str, balance: pd.DataFrame,
-                 cashflow: pd.DataFrame) -> float:
+                 cashflow: pd.DataFrame, pe_ratio: float) -> float:
     score = 0.0
 
     bs = _safe_sort(_filter(balance, stock_id))
@@ -144,6 +144,15 @@ def score_health(stock_id: str, balance: pd.DataFrame,
             score += 30
         elif quality >= 0.5:
             score += 15
+
+    # P/E 評估（20分）
+    if pe_ratio > 0:
+        if pe_ratio < 15:
+            score += 20
+        elif pe_ratio < 20:
+            score += 15
+        elif pe_ratio < 25:
+            score += 10
 
     return min(score, 100)
 
@@ -265,25 +274,6 @@ def score_momentum(stock_id: str, price: pd.DataFrame) -> float:
 
 
 # ─────────────────────────────────────────────
-# 估值輔助（自算 P/E，不需額外 API）
-# ─────────────────────────────────────────────
-
-def _calc_pe(stock_id: str, price: pd.DataFrame, income: pd.DataFrame) -> float:
-    """用最新股價 / 近 4 季 EPS 加總 自算年化 P/E。無效時回傳 0。"""
-    px = _safe_sort(_filter(price, stock_id))
-    inc = _safe_sort(_filter(income, stock_id))
-    if px.empty or inc.empty:
-        return 0.0
-    close = px.iloc[-1].get("close", 0) or 0
-    if len(inc) < 4:
-        return 0.0  # 不足 4 季資料，TTM 不可信，跳過
-    eps_ttm = inc.tail(4)["eps"].sum()
-    if eps_ttm <= 0 or close <= 0:
-        return 0.0
-    return round(close / eps_ttm, 1)
-
-
-# ─────────────────────────────────────────────
 # 綜合評分
 # ─────────────────────────────────────────────
 
@@ -308,7 +298,17 @@ def compute_all_scores(universe: list[dict],
         passed, reason = hard_filter(sid, income, balance, cashflow, revenue)
 
         p = score_profitability(sid, income, revenue)
-        h = score_health(sid, balance, cashflow)
+
+        pe_ratio = 0.0
+        px = _safe_sort(_filter(price, sid))
+        inc = _safe_sort(_filter(income, sid))
+        if not px.empty and len(inc) >= 4:
+            close_price = px.iloc[-1].get("close", 0) or 0
+            last_4_eps = inc.tail(4)["eps"].sum()
+            if last_4_eps > 0 and close_price > 0:
+                pe_ratio = round(close_price / last_4_eps, 1)
+
+        h = score_health(sid, balance, cashflow, pe_ratio)
         c = score_chip(sid, institutional, margin, shareholding)
         m = score_momentum(sid, price)
 
@@ -319,20 +319,6 @@ def compute_all_scores(universe: list[dict],
             m * WEIGHTS["momentum"]
         )
 
-        # P/E 估值調整（自算，不需額外 API）
-        pe = _calc_pe(sid, price, income)
-        if 0 < pe <= 15:
-            pe_adj = 5.0
-        elif 0 < pe <= 25:
-            pe_adj = 0.0
-        elif 0 < pe <= 40:
-            pe_adj = -5.0
-        elif pe > 40:
-            pe_adj = -10.0
-        else:
-            pe_adj = 0.0  # pe=0 表示虧損或無資料，不調整
-        total = max(0.0, min(total + pe_adj, 100.0))
-
         results.append({
             "stock_id": sid,
             "stock_name": name,
@@ -342,11 +328,11 @@ def compute_all_scores(universe: list[dict],
             "health": round(h, 1),
             "chip": round(c, 1),
             "momentum": round(m, 1),
-            "pe": pe,
+            "pe": pe_ratio,
             "total": round(total, 1),
         })
-        logger.debug("%s %s: P=%.0f H=%.0f C=%.0f M=%.0f PE=%.1f(adj%+.0f) → %.1f %s",
-                     sid, name, p, h, c, m, pe, pe_adj, total,
+        logger.debug("%s %s: P=%.0f H=%.0f C=%.0f M=%.0f PE=%.1f → %.1f %s",
+                     sid, name, p, h, c, m, pe_ratio, total,
                      "" if passed else f"[篩除: {reason}]")
 
     results.sort(key=lambda x: (x["passes_filter"], x["total"]), reverse=True)
