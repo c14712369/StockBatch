@@ -72,6 +72,7 @@ def run() -> None:
             "health_score": s["health"],
             "chip_score": s["chip"],
             "momentum_score": s["momentum"],
+            "pe": s.get("pe", 0),
             "total_score": s["total"],
             "passes_filter": s["passes_filter"],
             "filter_reason": s.get("filter_reason", ""),

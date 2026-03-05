@@ -1,10 +1,7 @@
 name: 盤中快報 - 每小時即時訊號
 
 on:
-  schedule:
-    # 平日 9:13–13:13 TST = 1:13–5:13 UTC，每小時 13 分（避開整點尖峰）
-    - cron: "13 1,2,3,4,5 * * 1-5"
-  workflow_dispatch:
+  workflow_dispatch:  # 僅保留手動觸發；排程已移至 GCP crontab
 
 jobs:
   intraday-alert:
