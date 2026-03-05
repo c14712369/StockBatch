@@ -70,7 +70,9 @@ def score_profitability(stock_id: str, income: pd.DataFrame,
     rev = _safe_sort(_filter(revenue, stock_id))
     if not rev.empty:
         avg_yoy = rev.tail(3)["revenue_yoy"].mean()
-        if avg_yoy >= 30:
+        if pd.isna(avg_yoy):
+            logger.debug("%s 月營收 YOY 全為 NaN，獲利動能 YOY 分項得 0", stock_id)
+        elif avg_yoy >= 30:
             score += 40
         elif avg_yoy >= 15:
             score += 30

@@ -40,7 +40,7 @@ def run() -> None:
     logger.info("抓取月營收（15個月）…")
     rev_df = fetchers.fetch_revenue(universe, months=15)
 
-    logger.info("抓取財務報表（yfinance 損益/資負/現金流，合併一次）…")
+    logger.info("抓取財務報表（FinMind 損益/資負/現金流，逐股抓取）…")
     income_df, balance_df, cashflow_df = fetchers.fetch_financials(universe)
 
     logger.info("抓取股權分散表（30日）…")
@@ -82,7 +82,29 @@ def run() -> None:
     db.upsert("weekly_scores", week_rows)
     logger.info("已儲存 %d 筆評分到 Supabase", len(week_rows))
 
-    # 4.5 模擬倉位 (Paper Trading) - 記錄本週推薦的進場價
+    # 4.5 模擬倉位 (Paper Trading) - 關閉前週倉位，記錄本週進場價
+    # 先將所有前週 open 倉位標記為 closed（含最終損益）
+    old_open = db.select("paper_trading_positions", filters={"status": "open"})
+    old_to_close = [p for p in old_open if p["week_date"] != today]
+    if old_to_close:
+        close_rows = []
+        for pos in old_to_close:
+            sid = pos["stock_id"]
+            px = price_df[price_df["stock_id"] == sid].sort_values("date")
+            current_price = float(px.iloc[-1].get("close", 0)) if not px.empty else float(pos.get("current_price") or 0)
+            entry_price = float(pos.get("entry_price") or 0)
+            pnl = ((current_price - entry_price) / entry_price * 100) if entry_price > 0 else 0.0
+            close_rows.append({
+                "week_date":          pos["week_date"],
+                "stock_id":           sid,
+                "entry_price":        entry_price,
+                "current_price":      current_price,
+                "unrealized_pnl_pct": round(pnl, 2),
+                "status":             "closed",
+            })
+        db.upsert("paper_trading_positions", close_rows)
+        logger.info("已關閉 %d 筆前週模擬倉位（最終損益已計算）", len(close_rows))
+
     # 找出前 10 名且通過門檻的股票作為本週模擬投資組合
     top_10 = [s for s in scores if s["passes_filter"]][:10]
     paper_rows = []

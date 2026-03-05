@@ -120,6 +120,7 @@ CREATE TABLE IF NOT EXISTS weekly_scores (
     health_score         NUMERIC(5,1),
     chip_score           NUMERIC(5,1),
     momentum_score       NUMERIC(5,1),
+    pe                   NUMERIC(8,1),  -- 自算年化 P/E（4季TTM），無效時為 0
     total_score          NUMERIC(5,1),
     passes_filter        BOOLEAN,
     filter_reason        TEXT,
