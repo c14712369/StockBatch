@@ -64,12 +64,21 @@ def _safe_float(v, default: float = 0.0) -> float:
 def _fetch_twse(stock_ids: list[str]) -> dict[str, dict]:
     """
     呼叫 TWSE MIS 即時 API。
+    先訪問首頁取得 session cookie，再呼叫 API。
     回傳 {stock_id: {price, open, high, low, volume}}
     若股票尚無成交（z="-"）則略過。
     """
     ex_ch = "|".join(f"tse_{sid}.tw" for sid in stock_ids)
     try:
-        resp = requests.get(
+        session = requests.Session()
+        # 先訪問首頁取得 JSESSIONID 等 cookies
+        session.get(
+            "https://mis.twse.com.tw/stock/index.jsp",
+            headers={"User-Agent": "Mozilla/5.0"},
+            timeout=10,
+        )
+
+        resp = session.get(
             TWSE_URL,
             params={"ex_ch": ex_ch, "json": "1", "delay": "0"},
             headers={"User-Agent": "Mozilla/5.0"},
