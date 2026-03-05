@@ -61,6 +61,10 @@ def _safe_float(v, default: float = 0.0) -> float:
         return default
 
 
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 def _fetch_twse(stock_ids: list[str]) -> dict[str, dict]:
     """
     呼叫 TWSE MIS 即時 API。
@@ -76,6 +80,7 @@ def _fetch_twse(stock_ids: list[str]) -> dict[str, dict]:
             "https://mis.twse.com.tw/stock/index.jsp",
             headers={"User-Agent": "Mozilla/5.0"},
             timeout=10,
+            verify=False
         )
 
         resp = session.get(
@@ -83,6 +88,7 @@ def _fetch_twse(stock_ids: list[str]) -> dict[str, dict]:
             params={"ex_ch": ex_ch, "json": "1", "delay": "0"},
             headers={"User-Agent": "Mozilla/5.0"},
             timeout=10,
+            verify=False
         )
         resp.raise_for_status()
         data = resp.json()
