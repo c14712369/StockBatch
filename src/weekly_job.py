@@ -10,6 +10,7 @@ import logging
 from datetime import date
 import pandas as pd
 from src import fetchers, scorers, notifier, db
+from src.config import TOP_N_PAPER
 from src.universe import get_universe, get_universe_ids
 
 logging.basicConfig(level=logging.INFO,
@@ -105,10 +106,10 @@ def run() -> None:
         db.upsert("paper_trading_positions", close_rows)
         logger.info("已關閉 %d 筆前週模擬倉位（最終損益已計算）", len(close_rows))
 
-    # 找出前 10 名且通過門檻的股票作為本週模擬投資組合
-    top_10 = [s for s in scores if s["passes_filter"]][:10]
+    # 找出前 TOP_N_PAPER 名且通過門檻的股票作為本週模擬投資組合
+    top_paper = [s for s in scores if s["passes_filter"]][:TOP_N_PAPER]
     paper_rows = []
-    for s in top_10:
+    for s in top_paper:
         sid = s["stock_id"]
         # entry_price 設為 0（哨兵值），等週一日報第一次更新時以當日收盤確認，
         # 避免用週五收盤當進場價而忽略週一開盤跳空的誤差。
@@ -126,7 +127,7 @@ def run() -> None:
     
     if paper_rows:
         db.upsert("paper_trading_positions", paper_rows)
-        logger.info("已更新 %d 筆模擬倉位 (Paper Trading)", len(paper_rows))
+        logger.info("已更新 %d 筆模擬倉位 (Paper Trading, TOP_%d)", len(paper_rows), TOP_N_PAPER)
 
     # 5. 發送週報
     notifier.send_weekly_report(scores, today)

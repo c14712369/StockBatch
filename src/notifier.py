@@ -1,7 +1,7 @@
 """Telegram 通知模組：格式化訊息並發送。"""
 import logging
 import requests
-from src.config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, TOP_N
+from src.config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID, TOP_N_WEEKLY
 
 logger = logging.getLogger(__name__)
 
@@ -46,10 +46,10 @@ def send_weekly_report(scores: list[dict], date_str: str) -> None:
     scores: compute_all_scores 的回傳值，已排序
     只發 passes_filter=True 的前 TOP_N 支
     """
-    candidates = [s for s in scores if s["passes_filter"]][:TOP_N]
+    candidates = [s for s in scores if s["passes_filter"]][:TOP_N_WEEKLY]
 
     lines = [f"📊 *台股潛力週報 {date_str}*\n"
-             f"評分範圍：Top {TOP_N} / {len(scores)} 支成分股",
+             f"評分範圍：Top {TOP_N_WEEKLY} / {len(scores)} 支成分股",
              ""]
 
     for i, s in enumerate(candidates, 1):

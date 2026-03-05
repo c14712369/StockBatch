@@ -33,8 +33,10 @@ WEIGHTS = {
     "momentum":      0.20,
 }
 
-# 每週推送數量
-TOP_N = 10
+# 推送 / 追蹤數量（三個場景獨立設定）
+TOP_N_WEEKLY    = 10   # 週報推送數（精選最強）
+TOP_N_WATCHLIST = 20   # 日報 / 晨報 / 盤中快報追蹤數（Universe 翻倍後等比例擴展）
+TOP_N_PAPER     = 10   # 模擬建倉數（控制 Paper Trading 部位數）
 
 # GitHub Actions 執行時間為 UTC，台灣時間 = UTC+8
 # Daily job: 平日 18:30 TST = 10:30 UTC

@@ -7,6 +7,7 @@ import logging
 from datetime import date
 import pandas as pd
 from src import notifier, db
+from src.config import TOP_N_WATCHLIST
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -22,7 +23,7 @@ def _get_watchlist() -> list[dict]:
     latest_week = df["week_date"].max()
     top = (df[(df["week_date"] == latest_week) & (df["passes_filter"] == True)]
            .sort_values("total_score", ascending=False)
-           .head(10))
+           .head(TOP_N_WATCHLIST))
     if top.empty:
         return []
     universe = {r["stock_id"]: r.get("stock_name", r["stock_id"])
