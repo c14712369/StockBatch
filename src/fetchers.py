@@ -12,7 +12,29 @@ from src import db, finmind
 logger = logging.getLogger(__name__)
 
 # ─── 設定 ───────────────────────────────────────
-_FM_DELAY = 0.3   # FinMind API 每次請求間隔（秒）
+_FM_DELAY   = 0.3   # FinMind API 每次請求間隔（秒）
+_BATCH_SIZE = 10    # 逐股 fallback 時每 N 支加長暫停（對應 yfinance chunk_size）
+
+
+def _batch_fetch(dataset: str, start: str, universe: set[str]) -> list[dict]:
+    """一次拉全市場資料並過濾出 universe 成員。
+    若回傳空（需付費或達上限）則由呼叫端 fallback 至逐股。
+    """
+    rows = finmind.fetch(dataset, start_date=start)
+    if not rows:
+        return []
+    filtered = [r for r in rows if r.get("stock_id") in universe]
+    logger.info("%s 批次拉取：全市場 %d 筆 → universe 過濾後 %d 筆",
+                dataset, len(rows), len(filtered))
+    return filtered
+
+
+def _batch_sleep(idx: int, total: int) -> None:
+    """逐股 fallback 迴圈節流：每 _BATCH_SIZE 支暫停 1s，其餘標準延遲。"""
+    if (idx + 1) % _BATCH_SIZE == 0 and (idx + 1) < total:
+        time.sleep(1.0)
+    else:
+        time.sleep(_FM_DELAY)
 
 
 def _date(days_ago: int = 0) -> str:
@@ -46,13 +68,8 @@ def fetch_price(universe: set[str], days: int = 90) -> pd.DataFrame:
 
     frames = []
     failed_sids = set()
-    for i, sid in enumerate(sorted(universe)):
-        rows = finmind.fetch("TaiwanStockPrice", start_date=start, stock_id=sid)
-        if not rows:
-            logger.debug("股價無資料: %s，準備以 yfinance 備援", sid)
-            failed_sids.add(sid)
-            time.sleep(_FM_DELAY)
-            continue
+
+    def _proc_price(rows: list[dict]) -> pd.DataFrame:
         df = pd.DataFrame(rows)
         df = df.rename(columns={"max": "high", "min": "low",
                                 "Trading_Volume": "volume"})
@@ -61,10 +78,29 @@ def fetch_price(universe: set[str], days: int = 90) -> pd.DataFrame:
         for col in ["open", "high", "low", "close"]:
             df[col] = pd.to_numeric(df[col], errors="coerce")
         df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0).astype(int)
+        return df
+
+    # 優先批次拉取（全市場一次 API call，再過濾）
+    batch_rows = _batch_fetch("TaiwanStockPrice", start, set(universe))
+    if batch_rows:
+        df = _proc_price(batch_rows)
         frames.append(df)
-        if (i + 1) % 10 == 0:
-            logger.info("價格進度：%d / %d", i + 1, len(universe))
-        time.sleep(_FM_DELAY)
+        failed_sids = set(universe) - set(df["stock_id"].unique())
+        if failed_sids:
+            logger.debug("批次未取得 %d 支，補逐股: %s", len(failed_sids), sorted(failed_sids))
+    else:
+        # 逐股 fallback（以 _BATCH_SIZE 為單位分批暫停）
+        logger.info("股價批次失敗，改為逐股抓取…")
+        for i, sid in enumerate(sorted(universe)):
+            rows = finmind.fetch("TaiwanStockPrice", start_date=start, stock_id=sid)
+            if not rows:
+                logger.debug("股價無資料: %s，準備以 yfinance 備援", sid)
+                failed_sids.add(sid)
+            else:
+                frames.append(_proc_price(rows))
+            if (i + 1) % _BATCH_SIZE == 0:
+                logger.info("價格進度：%d / %d", i + 1, len(universe))
+            _batch_sleep(i, len(universe))
 
     # 備援機制：如果 FinMind 返回空，使用 yfinance 補齊
     if failed_sids:
@@ -160,28 +196,53 @@ def fetch_institutional(universe: set[str], days: int = 60) -> pd.DataFrame:
     logger.info("FinMind 法人資料：%d 支股票（start=%s）…", len(universe), start)
 
     all_rows = []
-    for i, sid in enumerate(sorted(universe)):
-        rows = finmind.fetch("TaiwanStockInstitutionalInvestorsBuySell",
-                             start_date=start, stock_id=sid)
-        # 回傳格式：每個機構一筆 (long format)，需聚合成每日一筆
-        by_date: dict[str, dict] = {}
-        for r in rows:
-            d = r["date"]
-            if d not in by_date:
-                by_date[d] = {"foreign_net": 0.0, "trust_net": 0.0, "dealer_net": 0.0}
+
+    def _agg_inst(raw: list[dict]) -> list[dict]:
+        """將 FinMind 法人 long-format 聚合為 (stock_id, date) 一筆。"""
+        by_key: dict[tuple, dict] = {}
+        for r in raw:
+            key = (r["stock_id"], r["date"])
+            if key not in by_key:
+                by_key[key] = {"foreign_net": 0.0, "trust_net": 0.0, "dealer_net": 0.0}
             net = float(r.get("buy", 0) or 0) - float(r.get("sell", 0) or 0)
             name = r.get("name", "")
             if name == "Foreign_Investor":
-                by_date[d]["foreign_net"] += net
+                by_key[key]["foreign_net"] += net
             elif name == "Investment_Trust":
-                by_date[d]["trust_net"] += net
+                by_key[key]["trust_net"] += net
             elif name in ("Dealer_self", "Dealer_Hedging"):
-                by_date[d]["dealer_net"] += net
-        for d, vals in by_date.items():
-            all_rows.append({"stock_id": sid, "date": d, **vals})
-        if (i + 1) % 10 == 0:
-            logger.info("法人進度：%d / %d", i + 1, len(universe))
-        time.sleep(_FM_DELAY)
+                by_key[key]["dealer_net"] += net
+        return [{"stock_id": sid, "date": d, **vals}
+                for (sid, d), vals in by_key.items()]
+
+    # 優先批次拉取
+    batch_rows = _batch_fetch("TaiwanStockInstitutionalInvestorsBuySell", start, set(universe))
+    if batch_rows:
+        all_rows = _agg_inst(batch_rows)
+    else:
+        # 逐股 fallback（以 _BATCH_SIZE 為單位分批暫停）
+        logger.info("法人批次失敗，改為逐股抓取…")
+        for i, sid in enumerate(sorted(universe)):
+            rows = finmind.fetch("TaiwanStockInstitutionalInvestorsBuySell",
+                                 start_date=start, stock_id=sid)
+            by_date: dict[str, dict] = {}
+            for r in rows:
+                d = r["date"]
+                if d not in by_date:
+                    by_date[d] = {"foreign_net": 0.0, "trust_net": 0.0, "dealer_net": 0.0}
+                net = float(r.get("buy", 0) or 0) - float(r.get("sell", 0) or 0)
+                name = r.get("name", "")
+                if name == "Foreign_Investor":
+                    by_date[d]["foreign_net"] += net
+                elif name == "Investment_Trust":
+                    by_date[d]["trust_net"] += net
+                elif name in ("Dealer_self", "Dealer_Hedging"):
+                    by_date[d]["dealer_net"] += net
+            for d, vals in by_date.items():
+                all_rows.append({"stock_id": sid, "date": d, **vals})
+            if (i + 1) % _BATCH_SIZE == 0:
+                logger.info("法人進度：%d / %d", i + 1, len(universe))
+            _batch_sleep(i, len(universe))
 
     if not all_rows:
         return pd.DataFrame()
@@ -232,19 +293,29 @@ def fetch_margin(universe: set[str], days: int = 45) -> pd.DataFrame:
     logger.info("FinMind 融資資料：%d 支股票（start=%s）…", len(universe), start)
 
     all_rows = []
-    for i, sid in enumerate(sorted(universe)):
-        rows = finmind.fetch("TaiwanStockMarginPurchaseShortSale",
-                             start_date=start, stock_id=sid)
-        for r in rows:
-            all_rows.append({
-                "stock_id":       sid,
-                "date":           r["date"],
-                "margin_balance": float(r.get("MarginPurchaseTodayBalance", 0) or 0),
-                "short_balance":  float(r.get("ShortSaleTodayBalance", 0) or 0),
-            })
-        if (i + 1) % 10 == 0:
-            logger.info("融資進度：%d / %d", i + 1, len(universe))
-        time.sleep(_FM_DELAY)
+
+    def _proc_margin(raw: list[dict]) -> list[dict]:
+        return [{
+            "stock_id":       r["stock_id"],
+            "date":           r["date"],
+            "margin_balance": float(r.get("MarginPurchaseTodayBalance", 0) or 0),
+            "short_balance":  float(r.get("ShortSaleTodayBalance", 0) or 0),
+        } for r in raw]
+
+    # 優先批次拉取
+    batch_rows = _batch_fetch("TaiwanStockMarginPurchaseShortSale", start, set(universe))
+    if batch_rows:
+        all_rows = _proc_margin(batch_rows)
+    else:
+        # 逐股 fallback（以 _BATCH_SIZE 為單位分批暫停）
+        logger.info("融資批次失敗，改為逐股抓取…")
+        for i, sid in enumerate(sorted(universe)):
+            rows = finmind.fetch("TaiwanStockMarginPurchaseShortSale",
+                                 start_date=start, stock_id=sid)
+            all_rows.extend(_proc_margin(rows))
+            if (i + 1) % _BATCH_SIZE == 0:
+                logger.info("融資進度：%d / %d", i + 1, len(universe))
+            _batch_sleep(i, len(universe))
 
     if not all_rows:
         return pd.DataFrame()
@@ -284,11 +355,18 @@ def fetch_revenue(universe: set[str], months: int = 15) -> pd.DataFrame:
     """嘗試用 FinMind 抓月營收；若需付費則回傳空 DataFrame。"""
     all_rows = []
     start = _date(months * 31)
-    for sid in sorted(universe):
-        rows = finmind.fetch("TaiwanStockMonthRevenue",
-                             start_date=start, stock_id=sid)
-        all_rows.extend(rows)
-        time.sleep(0.2)
+
+    # 優先批次拉取
+    batch_rows = _batch_fetch("TaiwanStockMonthRevenue", start, set(universe))
+    if batch_rows:
+        all_rows = batch_rows
+    else:
+        # 逐股 fallback（以 _BATCH_SIZE 為單位分批暫停）
+        for i, sid in enumerate(sorted(universe)):
+            rows = finmind.fetch("TaiwanStockMonthRevenue",
+                                 start_date=start, stock_id=sid)
+            all_rows.extend(rows)
+            _batch_sleep(i, len(universe))
 
     if not all_rows:
         logger.warning("月營收：FinMind 免費版無資料，此維度評分將跳過")
