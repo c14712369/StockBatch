@@ -37,10 +37,9 @@ def hard_filter(stock_id: str, income: pd.DataFrame, balance: pd.DataFrame,
     """
     # --- 1. OCF > 0 ---
     cf = _safe_sort(_filter(cashflow, stock_id)) if not cashflow.empty and "stock_id" in cashflow.columns else pd.DataFrame()
-    if cf.empty:
-        return False, "無現金流量資料"
-    if cf.iloc[-1].get("operating_cf", 0) <= 0:
-        return False, f"最近一季 OCF = {cf.iloc[-1].get('operating_cf', 0):,.0f}"
+    if not cf.empty:
+        if cf.iloc[-1].get("operating_cf", 0) <= 0:
+            return False, f"最近一季 OCF = {cf.iloc[-1].get('operating_cf', 0):,.0f}"
 
     # --- 2. 負債比 < 60% ---
     bs = _safe_sort(_filter(balance, stock_id)) if not balance.empty and "stock_id" in balance.columns else pd.DataFrame()
@@ -200,6 +199,10 @@ def score_chip(stock_id: str, institutional: pd.DataFrame,
         elif chg <= 0.05:         # 融資微增
             score += 10
         # 融資大幅增加 → 0分
+        
+    if sh.empty:
+        # 若無大戶持股比資料（滿分變 70），按比例放大到 100
+        score = score * (100.0 / 70.0)
 
     return min(score, 100)
 

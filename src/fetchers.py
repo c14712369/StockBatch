@@ -154,7 +154,7 @@ def fetch_price(universe: set[str], days: int = 90) -> pd.DataFrame:
 # 2. 三大法人（FinMind TaiwanStockInstitutionalInvestors，逐股抓）
 # ────────────────────────────────────────────────
 
-def fetch_institutional(universe: set[str], days: int = 30) -> pd.DataFrame:
+def fetch_institutional(universe: set[str], days: int = 60) -> pd.DataFrame:
     """FinMind 三大法人：計算連買/賣天數。"""
     start = _date(days)
     logger.info("FinMind 法人資料：%d 支股票（start=%s）…", len(universe), start)
@@ -280,7 +280,7 @@ def fetch_margin(universe: set[str], days: int = 45) -> pd.DataFrame:
 # 4. 月營收（FinMind 免費嘗試）
 # ────────────────────────────────────────────────
 
-def fetch_revenue(universe: set[str], months: int = 6) -> pd.DataFrame:
+def fetch_revenue(universe: set[str], months: int = 14) -> pd.DataFrame:
     """嘗試用 FinMind 抓月營收；若需付費則回傳空 DataFrame。"""
     all_rows = []
     start = _date(months * 31)
@@ -376,7 +376,8 @@ def fetch_financials(universe: set[str]) -> tuple[pd.DataFrame, pd.DataFrame, pd
         inc["net_income"]       = get("IncomeAfterTaxes")
         inc["net_margin"]       = (inc["net_income"] / rev.replace(0, float("nan")) * 100).fillna(0).round(2)
         inc = inc.sort_values(["stock_id", "date"])
-        inc["eps_qoq"] = inc.groupby("stock_id")["eps"].pct_change(fill_method=None) * 100
+        eps_grp = inc.groupby("stock_id")["eps"]
+        inc["eps_qoq"] = (eps_grp.diff() / eps_grp.shift().abs().replace(0, float("nan"))) * 100
         db.upsert("quarterly_income", [
             {"stock_id": r["stock_id"],
              "year": int(r["date"].year), "quarter": (int(r["date"].month) - 1) // 3 + 1,
@@ -394,10 +395,11 @@ def fetch_financials(universe: set[str]) -> tuple[pd.DataFrame, pd.DataFrame, pd
         get = lambda c: pd.to_numeric(pv.get(c, 0), errors="coerce").fillna(0)
         ta = get("TotalAssets"); tl = get("Liabilities")
         ca = get("CurrentAssets"); cl = get("CurrentLiabilities")
+        inv = get("Inventories")
         bal = pv[["stock_id", "date"]].copy()
         bal["debt_ratio"]    = (tl / ta.replace(0, float("nan")) * 100).fillna(0).round(2)
         bal["current_ratio"] = (ca / cl.replace(0, float("nan"))).fillna(0).round(2)
-        bal["quick_ratio"]   = bal["current_ratio"]
+        bal["quick_ratio"]   = ((ca - inv) / cl.replace(0, float("nan"))).fillna(0).round(2)
         bal = bal.sort_values(["stock_id", "date"])
         db.upsert("quarterly_balance", [
             {"stock_id": r["stock_id"],
@@ -456,6 +458,47 @@ def fetch_shareholding(universe: set[str], days: int = 30) -> pd.DataFrame:
 # ────────────────────────────────────────────────
 
 def fetch_valuation(universe: set[str], **_) -> pd.DataFrame:
-    """TaiwanStockPER 為付費功能，免費版跳過。估值不影響評分。"""
-    logger.info("估值資料：TaiwanStockPER 需付費，跳過")
-    return pd.DataFrame()
+    """利用 yfinance 取得本益比與股淨比。"""
+    import yfinance as yf
+    from datetime import date
+    
+    today = date.today().strftime("%Y-%m-%d")
+    logger.info("yfinance 估值資料：%d 支股票…", len(universe))
+    
+    all_rows = []
+    for i, sid in enumerate(sorted(universe)):
+        try:
+            ticker = yf.Ticker(f"{sid}.TW")
+            info = ticker.info
+            per = info.get("trailingPE", 0)
+            pbr = info.get("priceToBook", 0)
+            if per or pbr:
+                all_rows.append({
+                    "stock_id": sid,
+                    "date": today,
+                    "per": per,
+                    "pbr": pbr
+                })
+        except Exception as e:
+            logger.warning("無法取得 %s 估值資料: %s", sid, e)
+            
+        if (i + 1) % 10 == 0:
+            logger.info("估值進度：%d / %d", i + 1, len(universe))
+            
+    if not all_rows:
+        return pd.DataFrame()
+        
+    df = pd.DataFrame(all_rows)
+    df["date"] = pd.to_datetime(df["date"])
+    
+    db.upsert("valuation", [
+        {
+            "stock_id": r["stock_id"],
+            "date": r["date"].strftime("%Y-%m-%d"),
+            "per": float(r["per"] or 0),
+            "pbr": float(r["pbr"] or 0)
+        }
+        for _, r in df.iterrows()
+    ])
+    logger.info("估值資料：%d 筆", len(df))
+    return df

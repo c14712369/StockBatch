@@ -52,7 +52,7 @@ def run() -> None:
 
     # 抓取今日資料（只針對 watchlist，減少 API 呼叫）
     price_df = fetchers.fetch_price(universe, days=65)   # 65天夠算 60MA
-    inst_df = fetchers.fetch_institutional(universe, days=30)
+    inst_df = fetchers.fetch_institutional(universe, days=60)
     margin_df = fetchers.fetch_margin(universe, days=30)
 
     # 組合日報資料

@@ -31,14 +31,14 @@ def run() -> None:
     logger.info("抓取價格資料（90日）…")
     price_df = fetchers.fetch_price(universe, days=90)
 
-    logger.info("抓取法人資料（30日）…")
-    inst_df = fetchers.fetch_institutional(universe, days=30)
+    logger.info("抓取法人資料（60日）…")
+    inst_df = fetchers.fetch_institutional(universe, days=60)
 
     logger.info("抓取融資資料（60日）…")
     margin_df = fetchers.fetch_margin(universe, days=60)
 
-    logger.info("抓取月營收（6個月）…")
-    rev_df = fetchers.fetch_revenue(universe, months=6)
+    logger.info("抓取月營收（14個月）…")
+    rev_df = fetchers.fetch_revenue(universe, months=14)
 
     logger.info("抓取財務報表（yfinance 損益/資負/現金流，合併一次）…")
     income_df, balance_df, cashflow_df = fetchers.fetch_financials(universe)
