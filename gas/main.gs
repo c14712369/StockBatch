@@ -1,5 +1,25 @@
 /**
- * cron-job.org 呼叫此 endpoint 觸發每日掃描
+ * 設定每日時間觸發器（只需手動執行一次）
+ * 觸發時間：每天 8–9 點之間（GAS 內建觸發器誤差約 ±15 分鐘）
+ */
+function setupTrigger() {
+  // 刪除舊觸發器，避免重複
+  ScriptApp.getProjectTriggers().forEach(function(t) {
+    ScriptApp.deleteTrigger(t);
+  });
+
+  ScriptApp.newTrigger('runStockScan')
+    .timeBased()
+    .everyDays(1)
+    .atHour(8)
+    .inTimezone('Asia/Taipei')
+    .create();
+
+  Logger.log('✅ 觸發器已設定：每天 Asia/Taipei 8–9 點執行 runStockScan');
+}
+
+/**
+ * cron-job.org 呼叫此 endpoint 觸發每日掃描（備用，可不用）
  * URL 帶上 ?secret=YOUR_CRON_SECRET
  */
 function doGet(e) {
