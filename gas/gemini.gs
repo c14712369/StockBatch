@@ -71,11 +71,11 @@ function callGemini(prompt, modelId, apiKey) {
 /**
  * 將 Gemini 回應文字依任務段落切割
  * @param {string} text
- * @returns {string[]} 最多 6 段（環境偵測、任務一~四、自檢表）
+ * @returns {string[]} 最多 7 段（環境偵測、任務一~五、自檢表）
  */
 function parseResponse(text) {
   // 偵測段落分界點的 regex
-  const sectionPattern = /(第[一二三四]步|環境偵測|任務[一二三四]|數據完整度自檢)/;
+  const sectionPattern = /(第[一二三四五]步|環境偵測|任務[一二三四五]|ETF|數據完整度自檢)/;
 
   const lines = text.split('\n');
   const segments = [];
